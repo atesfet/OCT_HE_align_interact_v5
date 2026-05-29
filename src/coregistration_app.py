@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import base64
 import cgi
+import concurrent.futures
 import json
 import math
 import mimetypes
 import os
 import shutil
+import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -60,6 +64,9 @@ APP_ROOT = Path(
     )
 )
 MAX_SEARCH_DIM = 420
+ALIGN_SCRIPT = Path(__file__).resolve().parent / "align_he_to_oct_2D_v5.py"
+BATCH_JOBS: dict[str, dict[str, Any]] = {}
+BATCH_LOCK = threading.Lock()
 
 
 @dataclass
@@ -145,6 +152,131 @@ def _unique_session_root(session_id: str) -> tuple[str, Path]:
         if not root.exists():
             return indexed, root
     raise RuntimeError(f"Could not create a unique output folder for {candidate}")
+
+
+def _unique_child_root(parent: Path, session_id: str) -> tuple[str, Path]:
+    candidate = _slug(session_id)
+    root = parent / candidate
+    if not root.exists():
+        return candidate, root
+    for index in range(2, 10000):
+        indexed = f"{candidate}_{index:02d}"
+        root = parent / indexed
+        if not root.exists():
+            return indexed, root
+    raise RuntimeError(f"Could not create a unique output folder for {candidate}")
+
+
+def _find_batch_pairs(input_root: Path, batch_root: Path) -> list[dict[str, Any]]:
+    tif_paths = sorted(
+        p for p in input_root.rglob("*.tif*")
+        if p.is_file() and not p.name.startswith("._") and "coregistration_outputs" not in p.parts
+    )
+    oct_paths = [p for p in tif_paths if "oct" in p.stem.lower()]
+    cases: list[dict[str, Any]] = []
+    seen: set[tuple[Path, Path]] = set()
+    for oct_path in oct_paths:
+        oct_base = _slug(_clean_stem(oct_path, ("_oct", "-oct", " oct"))).lower()
+        folder_tifs = [p for p in tif_paths if p.parent == oct_path.parent and p != oct_path]
+        he_candidates = [p for p in folder_tifs if "oct" not in p.stem.lower()]
+        matching = [p for p in he_candidates if oct_base and oct_base in _slug(p.stem).lower()]
+        selected = matching or he_candidates
+        for he_path in selected:
+            key = (oct_path.resolve(), he_path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            case_id = _session_id_from_paths(oct_path, he_path)
+            sample_id, output_dir = _unique_child_root(batch_root, case_id)
+            cases.append({
+                "case_id": sample_id,
+                "oct_path": oct_path,
+                "he_path": he_path,
+                "output_dir": output_dir,
+                "session_id": f"{batch_root.name}/{sample_id}",
+            })
+    return cases
+
+
+def _run_batch_case(case: dict[str, Any], overwrite: bool = True) -> dict[str, Any]:
+    output_dir = Path(case["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_session(output_dir, Path(case["oct_path"]), Path(case["he_path"]))
+    log_path = output_dir / "run.log"
+    cmd = [
+        sys.executable,
+        str(ALIGN_SCRIPT),
+        "--oct-path",
+        str(case["oct_path"]),
+        "--he-path",
+        str(case["he_path"]),
+        "--output-dir",
+        str(output_dir),
+        "--case-id",
+        str(case["case_id"]),
+        "--overwrite",
+    ]
+    if not overwrite:
+        cmd.pop()
+    start = time.time()
+    with log_path.open("w", encoding="utf-8") as log:
+        log.write(" ".join(cmd) + "\n\n")
+        log.flush()
+        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+    result = {
+        "case_id": case["case_id"],
+        "session_id": case["session_id"],
+        "status": "ok" if proc.returncode == 0 else "failed",
+        "returncode": proc.returncode,
+        "elapsed_seconds": round(time.time() - start, 2),
+        "oct_path": str(case["oct_path"]),
+        "he_path": str(case["he_path"]),
+        "output_dir": str(output_dir),
+        "log_path": str(log_path),
+        "overlay": "overlay_preview.png" if (output_dir / "overlay_preview.png").exists() else "overlay_false_color.png",
+        "keep": True,
+    }
+    _sync_clean_outputs(SessionPaths(output_dir, Path(case["oct_path"]), Path(case["he_path"])))
+    return result
+
+
+def _run_batch_job(batch_id: str, cases: list[dict[str, Any]], workers: int) -> None:
+    with BATCH_LOCK:
+        BATCH_JOBS[batch_id]["status"] = "running"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_case = {executor.submit(_run_batch_case, case): case for case in cases}
+        for future in concurrent.futures.as_completed(future_to_case):
+            case = future_to_case[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {
+                    "case_id": case["case_id"],
+                    "session_id": case["session_id"],
+                    "status": "failed",
+                    "error": str(exc),
+                    "oct_path": str(case["oct_path"]),
+                    "he_path": str(case["he_path"]),
+                    "output_dir": str(case["output_dir"]),
+                    "keep": True,
+                }
+            with BATCH_LOCK:
+                job = BATCH_JOBS[batch_id]
+                job["completed"] += 1
+                job["results"].append(result)
+    with BATCH_LOCK:
+        BATCH_JOBS[batch_id]["status"] = "completed"
+        BATCH_JOBS[batch_id]["finished_at"] = time.time()
+
+
+def _public_batch_job(batch_id: str) -> dict[str, Any]:
+    with BATCH_LOCK:
+        if batch_id not in BATCH_JOBS:
+            raise FileNotFoundError(f"Unknown batch: {batch_id}")
+        job = dict(BATCH_JOBS[batch_id])
+        job["results"] = [dict(result) for result in BATCH_JOBS[batch_id].get("results", [])]
+    job.pop("cases", None)
+    return job
 
 
 def _save_gray_png(path: Path, image: np.ndarray) -> None:
@@ -622,6 +754,15 @@ HTML = r"""
     .small input, .small select { min-height:34px; padding:6px 9px; vertical-align:middle; }
     #saveLinks { margin-top:12px; display:grid; gap:8px; }
     #saveLinks a { color:var(--accent); font-weight:800; }
+    .batch-results { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; margin-top:16px; }
+    .batch-card { background:rgba(255,255,255,.62); border:1px solid rgba(215,208,192,.9); border-radius:18px; padding:12px; box-shadow:0 12px 28px rgba(38,43,39,.10); }
+    .batch-card.failed { border-color:rgba(212,107,61,.55); background:rgba(255,245,239,.74); }
+    .batch-card.deleted { opacity:.56; filter:grayscale(.25); }
+    .batch-card img { width:100%; max-height:260px; object-fit:contain; background:#111b18; border-radius:14px; border:1px solid var(--line); }
+    .keep-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; font-weight:900; }
+    .keep-row input { min-height:auto; transform:scale(1.25); accent-color:var(--accent); }
+    .pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:900; background:#e7f4ed; color:#125b4c; }
+    .pill.failed { background:#fff0e9; color:#9a4726; }
     @media (max-width:760px) {
       header { padding:26px 18px; }
       main { padding:18px 12px 48px; }
@@ -671,6 +812,19 @@ HTML = r"""
     </div>
   </section>
   <section>
+    <h2>Batch Process</h2>
+    <div class="grid">
+      <div><label>Input folder</label><input id="batchInput" type="text" placeholder="/path/to/folder/with/multiple/samples"></div>
+      <div><label>Samples to process in parallel</label><input id="batchWorkers" type="number" value="4" min="1" max="16" step="1"></div>
+    </div>
+    <button onclick="startBatch()">Run Batch Registration</button>
+    <button class="secondary" onclick="applyBatchKeepChoices()">Delete Unchecked Outputs</button>
+    <div id="busy-batch" class="busy"><progress></progress> Batch registration is running...</div>
+    <div class="small">Batch mode runs the non-interactive v5 registration for every OCT/HE pair found in the input folder. Results default to keep. Uncheck any result you do not want, then click Delete Unchecked Outputs.</div>
+    <div id="batchStatus" class="small">No batch run started.</div>
+    <div id="batchResults" class="batch-results"></div>
+  </section>
+  <section>
     <h2>3. Remove Background And Edit Masks</h2>
     <div class="grid">
       <div><label>HE mask mode</label><select id="heMaskMode"><option value="auto">auto</option><option value="gray">gray</option><option value="rembg">rembg</option></select></div>
@@ -714,13 +868,18 @@ HTML = r"""
   <section><h2>Status</h2><div id="status" class="status">Ready.</div></section>
 </main>
 <script>
-let sessionId=null; let debounce=null; let liveImages={he:null,oct:null,mask:null};
+let sessionId=null; let debounce=null; let liveImages={he:null,oct:null,mask:null}; let batchId=null; let batchTimer=null;
 let editors={};
 function setStatus(x){ document.getElementById('status').textContent = x; }
 async function api(path, body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
 function img(name){ return `/api/file?session=${sessionId}&name=${name}&t=${Date.now()}`; }
 function setBusy(id, on){ const el=document.getElementById(id); if(el) el.classList.toggle('active', on); document.querySelectorAll('button').forEach(b=>b.disabled=on); }
 async function withBusy(id, label, fn){ setBusy(id,true); setStatus(label); try { const out=await fn(); return out; } catch(e) { setStatus('Error: '+e.message); throw e; } finally { setBusy(id,false); } }
+function batchImg(record){ return `/api/file?session=${encodeURIComponent(record.session_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
+function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ status.textContent='No batch run started.'; return; } status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
+async function pollBatch(){ if(!batchId)return; const job=await api('/api/batch_status',{batch_id:batchId}); renderBatch(job); const running=job.status==='queued'||job.status==='running'; setBusy('busy-batch', running); if(running){ batchTimer=setTimeout(pollBatch,2500); } else { setStatus(`Batch ${batchId} complete. Review overlays and uncheck any outputs to delete.`); } }
+async function startBatch(){ await withBusy('busy-batch','Starting batch registration...', async()=>{ const j=await api('/api/batch_start',{input_root:batchInput.value,workers:parseInt(batchWorkers.value||'1',10)}); batchId=j.batch_id; renderBatch(j); clearTimeout(batchTimer); batchTimer=setTimeout(pollBatch,1000); setStatus(`Started batch ${batchId} with ${j.total} sample(s).`); }); }
+async function applyBatchKeepChoices(){ if(!batchId){ setStatus('No batch run to finalize.'); return; } const keep={}; document.querySelectorAll('#batchResults input[data-case]').forEach(cb=>{ keep[cb.dataset.case]=cb.checked; }); const j=await api('/api/batch_apply_keep',{batch_id:batchId,keep}); renderBatch(j); setStatus(`Deleted ${j.deleted_count||0} unchecked output folder(s).`); }
 async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value}); sessionId=j.session_id; setStatus('Loaded session '+sessionId); }); }
 async function uploadFiles(){ await withBusy('busy-load','Uploading files...', async()=>{ const fd=new FormData(); fd.append('oct', octFile.files[0]); fd.append('he', heFile.files[0]); const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); sessionId=j.session_id; setStatus('Uploaded session '+sessionId); }); }
 async function preprocess(){ await withBusy('busy-preprocess','Preprocessing OCT and HE...', async()=>{ const j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); setStatus(JSON.stringify(j,null,2)); }); }
@@ -778,7 +937,60 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/upload":
+            if parsed.path == "/api/batch_start":
+                payload = _read_json(self)
+                input_root = Path(payload["input_root"]).expanduser().resolve()
+                workers = max(1, min(16, int(payload.get("workers", 4))))
+                if not input_root.exists() or not input_root.is_dir():
+                    raise FileNotFoundError("Batch input folder does not exist")
+                batch_base = f"batch_{_slug(input_root.name)}_{time.strftime('%Y%m%d_%H%M%S')}"
+                batch_id, batch_root = _unique_session_root(batch_base)
+                batch_root.mkdir(parents=True, exist_ok=True)
+                cases = _find_batch_pairs(input_root, batch_root)
+                if not cases:
+                    raise ValueError("No OCT/HE sample pairs were found in the input folder")
+                job = {
+                    "batch_id": batch_id,
+                    "status": "queued",
+                    "input_root": str(input_root),
+                    "output_root": str(batch_root),
+                    "workers": workers,
+                    "total": len(cases),
+                    "completed": 0,
+                    "results": [],
+                    "started_at": time.time(),
+                    "cases": cases,
+                }
+                with BATCH_LOCK:
+                    BATCH_JOBS[batch_id] = job
+                thread = threading.Thread(target=_run_batch_job, args=(batch_id, cases, workers), daemon=True)
+                thread.start()
+                _json_response(self, _public_batch_job(batch_id))
+            elif parsed.path == "/api/batch_status":
+                payload = _read_json(self)
+                _json_response(self, _public_batch_job(payload["batch_id"]))
+            elif parsed.path == "/api/batch_apply_keep":
+                payload = _read_json(self)
+                batch_id = payload["batch_id"]
+                keep = payload.get("keep", {})
+                deleted_count = 0
+                with BATCH_LOCK:
+                    if batch_id not in BATCH_JOBS:
+                        raise FileNotFoundError(f"Unknown batch: {batch_id}")
+                    for result in BATCH_JOBS[batch_id].get("results", []):
+                        case_id = result.get("case_id")
+                        should_keep = bool(keep.get(case_id, result.get("keep", True)))
+                        result["keep"] = should_keep
+                        if not should_keep and result.get("status") != "deleted":
+                            output_dir = Path(result["output_dir"])
+                            if output_dir.exists():
+                                shutil.rmtree(output_dir)
+                                deleted_count += 1
+                            result["status"] = "deleted"
+                response = _public_batch_job(batch_id)
+                response["deleted_count"] = deleted_count
+                _json_response(self, response)
+            elif parsed.path == "/api/upload":
                 form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST"})
                 oct_item = form["oct"]
                 he_item = form["he"]

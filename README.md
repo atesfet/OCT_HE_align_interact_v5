@@ -29,6 +29,14 @@ alignment_summary.json
 
 The app also saves preview images for masks, overlays, and QC checks.
 
+The clean final files are also copied into a simple `output` folder inside each sample folder:
+
+```text
+output/he_registered.tiff
+output/oct_registered.tiff
+output/registered_mask.tiff
+```
+
 ## Recommended Installation For Non-Coders
 
 These instructions use Miniconda because it keeps the app separate from the rest of your computer.
@@ -116,6 +124,21 @@ If macOS blocks the file because it was downloaded from the internet, right-clic
 5. Auto-register: run automatic HE-to-OCT alignment.
 6. Manually adjust: fine-tune scale, rotation, translation, and HE opacity if needed.
 7. Save: save the final registered OCT, registered HE, and overlap mask.
+
+## Batch Processing
+
+The app also has a `Batch Process` section for running many samples without manual interaction.
+
+1. Enter the input folder that contains multiple OCT/HE samples.
+2. Enter how many samples should run in parallel.
+3. Click `Run Batch Registration`.
+4. Wait until the batch status says complete.
+5. Review the overlay preview shown for each sample.
+6. Leave `keep` checked for samples you want to keep.
+7. Uncheck `keep` for samples you want to discard.
+8. Click `Delete Unchecked Outputs`.
+
+By default, every sample is marked as `keep`, so nothing is deleted unless you uncheck it.
 
 ## Notes About File Sizes
 

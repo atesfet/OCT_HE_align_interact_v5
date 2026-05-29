@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -693,6 +694,7 @@ def register_pair(
     _save_rgb_tiff(pair.output_dir / "he_registered.tiff", warped_he)
     _save_float(pair.output_dir / "oct_registered.tiff", oct_registered)
     _save_mask_tiff(pair.output_dir / "registered_mask.tiff", overlap)
+    _sync_clean_outputs(pair.output_dir)
     _save_rgb(pair.output_dir / "he_registered_preview.png", warped_he)
     _save_gray(pair.output_dir / "oct_registered_preview.png", oct_registered)
     _save_gray(pair.output_dir / "registered_mask_preview.png", overlap.astype(np.float32))
@@ -711,6 +713,7 @@ def register_pair(
     _save_gray(pair.output_dir / "he_warped_mask.png", warped_mask.astype(np.float32))
     _save_gray(pair.output_dir / "overlap_mask.png", overlap.astype(np.float32))
     _save_rgb(pair.output_dir / "he_warped_overlap_only.png", warped_he * overlap[..., None])
+    _save_rgb(pair.output_dir / "overlay_preview.png", _overlay_preview(warped_he, oct_pre_native["contrast"], overlap))
     _save_rgb(pair.output_dir / "overlay_false_color.png", _false_color(warped_he, oct_pre_native["contrast"], oct_mask_native))
     _save_rgb(pair.output_dir / "overlay_contours.png", _contours(warped_he, warped_mask, oct_mask_native))
     _save_rgb(pair.output_dir / "overlay_checkerboard.png", _checkerboard(warped_he, _gray_to_rgb(oct_pre_native["contrast"]), tile=48))
@@ -746,9 +749,13 @@ def register_pair(
             "oct_contrast_adjusted.png",
             "he_black_white_input.png",
             "overlay_false_color.png",
+            "overlay_preview.png",
             "overlay_contours.png",
             "overlay_checkerboard.png",
             "overlap_mask.png",
+            "output/he_registered.tiff",
+            "output/oct_registered.tiff",
+            "output/registered_mask.tiff",
         ]},
     }
     (pair.output_dir / "alignment_summary.json").write_text(json.dumps(summary, indent=2))
@@ -788,6 +795,15 @@ def _save_mask_tiff(path: Path, mask: np.ndarray) -> None:
     tifffile.imwrite(str(path), (np.asarray(mask).astype(bool).astype(np.uint8) * 255))
 
 
+def _sync_clean_outputs(output_dir: Path) -> None:
+    clean_dir = output_dir / "output"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    for name in ["he_registered.tiff", "oct_registered.tiff", "registered_mask.tiff"]:
+        src = output_dir / name
+        if src.exists():
+            shutil.copy2(src, clean_dir / name)
+
+
 def _gray_to_rgb(gray: np.ndarray) -> np.ndarray:
     return np.repeat(_to_uint8(gray)[..., None], 3, axis=2).astype(np.float32)
 
@@ -799,6 +815,16 @@ def _false_color(he_rgb: np.ndarray, oct_gray: np.ndarray, oct_mask: np.ndarray)
     out[..., 1] = np.maximum(out[..., 1], oct_img * oct_mask)
     out[..., 2] = np.maximum(out[..., 2], oct_img * oct_mask * 0.45)
     return out
+
+
+def _overlay_preview(he_rgb: np.ndarray, oct_gray: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    he = _to_uint8(he_rgb).astype(np.float32) / 255.0
+    oct_img = _to_uint8(oct_gray).astype(np.float32) / 255.0
+    out = he * 0.82
+    out[..., 1] = np.maximum(out[..., 1], oct_img * 0.95)
+    out[..., 2] = np.maximum(out[..., 2], oct_img * 0.35)
+    out[~mask.astype(bool)] *= 0.82
+    return np.clip(out, 0, 1)
 
 
 def _contours(he_rgb: np.ndarray, he_mask: np.ndarray, oct_mask: np.ndarray) -> np.ndarray:
