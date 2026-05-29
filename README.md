@@ -179,25 +179,3 @@ http://127.0.0.1:8770/
 ```
 
 If installation fails, confirm that you are using the conda environment with Python 3.12. Version 5 includes a recovered v3 registration reference that expects Python 3.12.
-
-## For GitHub Maintainers
-
-Suggested repository name:
-
-```text
-OCT_HE_align_interact_v5
-```
-
-To push this folder to GitHub:
-
-```bash
-cd OCT_HE_align_interact_v5
-git init
-git add .
-git commit -m "Initial OCT HE interactive alignment v5 release"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/OCT_HE_align_interact_v5.git
-git push -u origin main
-```
-
-Replace `YOUR_USERNAME` with your GitHub username.
