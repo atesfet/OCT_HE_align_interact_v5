@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+!src/recovered_bytecode/
+!src/recovered_bytecode/*.pyc
+.DS_Store
+.venv/
+venv/
+coregistration_outputs/
+*.log
+u2net.onnx
+.cache/
