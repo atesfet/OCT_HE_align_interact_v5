@@ -105,7 +105,7 @@ On macOS, after installing Miniconda, you can alternatively double-click `setup_
 Run:
 
 ```bash
-conda activate oct_he_align_v5
+conda activate alignment_v5_env
 python src/coregistration_app.py --host 127.0.0.1 --port 8766
 ```
 

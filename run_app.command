@@ -13,6 +13,6 @@ elif command -v conda >/dev/null 2>&1; then
   eval "$(conda shell.bash hook)"
 fi
 
-conda activate oct_he_align_v5
+conda activate alignment_v5_env
 
 python src/coregistration_app.py --host 127.0.0.1 --port 8766

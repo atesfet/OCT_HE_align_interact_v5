@@ -1,4 +1,4 @@
-name: oct_he_align_v5
+name: alignment_v5_env
 channels:
   - conda-forge
 dependencies:
