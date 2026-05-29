@@ -778,6 +778,19 @@ HTML = r"""
 <header><div class="small">Interactive registration workspace</div><h1>OCT/HE Coregistration Studio</h1><div class="small">Preprocess | Mask and edit | Auto-register | Manually adjust | Save native-resolution outputs</div><div class="app-meta">Version 5 | Ates Fettahoglu</div></header>
 <main>
   <section>
+    <h2>Batch Process</h2>
+    <div class="grid">
+      <div><label>Input folder</label><input id="batchInput" type="text" placeholder="/path/to/folder/with/multiple/samples"></div>
+      <div><label>Samples to process in parallel</label><input id="batchWorkers" type="number" value="4" min="1" max="16" step="1"></div>
+    </div>
+    <button onclick="startBatch()">Run Batch Registration</button>
+    <button class="secondary" onclick="applyBatchKeepChoices()">Delete Unchecked Outputs</button>
+    <div id="busy-batch" class="busy"><progress></progress> Batch registration is running...</div>
+    <div class="small">Batch mode runs the non-interactive v5 registration for every OCT/HE pair found in the input folder. Results default to keep. Uncheck any result you do not want, then click Delete Unchecked Outputs.</div>
+    <div id="batchStatus" class="small">No batch run started.</div>
+    <div id="batchResults" class="batch-results"></div>
+  </section>
+  <section>
     <h2>1. Load Images</h2>
     <div class="grid">
       <div><label>OCT path</label><input id="octPath" type="text" placeholder="/path/to/sample_oct.tiff"></div>
@@ -810,19 +823,6 @@ HTML = r"""
       <div class="image-card"><div class="caption">Stain/color standardized</div><img id="hePre"></div>
       <div class="image-card"><div class="caption">Black-white mask input</div><img id="heBW"></div>
     </div>
-  </section>
-  <section>
-    <h2>Batch Process</h2>
-    <div class="grid">
-      <div><label>Input folder</label><input id="batchInput" type="text" placeholder="/path/to/folder/with/multiple/samples"></div>
-      <div><label>Samples to process in parallel</label><input id="batchWorkers" type="number" value="4" min="1" max="16" step="1"></div>
-    </div>
-    <button onclick="startBatch()">Run Batch Registration</button>
-    <button class="secondary" onclick="applyBatchKeepChoices()">Delete Unchecked Outputs</button>
-    <div id="busy-batch" class="busy"><progress></progress> Batch registration is running...</div>
-    <div class="small">Batch mode runs the non-interactive v5 registration for every OCT/HE pair found in the input folder. Results default to keep. Uncheck any result you do not want, then click Delete Unchecked Outputs.</div>
-    <div id="batchStatus" class="small">No batch run started.</div>
-    <div id="batchResults" class="batch-results"></div>
   </section>
   <section>
     <h2>3. Remove Background And Edit Masks</h2>
