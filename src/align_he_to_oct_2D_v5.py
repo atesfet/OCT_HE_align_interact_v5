@@ -34,6 +34,10 @@ _V3 = _v3_reference._impl
 V5_CACHE_ROOT = Path(os.environ.get("OCTHE_V5_2D_CACHE", Path.home() / ".cache" / "octhe_v5_2d"))
 REMBG_CACHE_ROOT = V5_CACHE_ROOT / "rembg"
 NUMBA_CACHE_ROOT = V5_CACHE_ROOT / "numba"
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DEFAULT_INPUT_ROOT = PROJECT_ROOT / "samples"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "coregistration_outputs" / "align_he_to_oct_2D_v5"
 
 MACENKO_TARGET_STAINS = np.array(
     [
@@ -980,8 +984,8 @@ def _native_matrix(search_matrix: np.ndarray, he_shape: tuple[int, int], oct_sha
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Self-contained 2D HE-to-OCT registration with v5 preprocessing and v3-style registration.")
-    parser.add_argument("--input-root", type=Path, default=Path("/Volumes/T402/OCTHE_26Q1/Ongoing_2um_per_pixel"))
-    parser.add_argument("--output-root", type=Path, default=Path("/Volumes/T402/OCTHE_26Q1/coregistration_outputs/align_he_to_oct_2D_v5/Ongoing_2um_per_pixel"))
+    parser.add_argument("--input-root", type=Path, default=DEFAULT_INPUT_ROOT)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--oct-path", type=Path, default=None)
     parser.add_argument("--he-path", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)

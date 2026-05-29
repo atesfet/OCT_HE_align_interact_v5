@@ -16,6 +16,20 @@ For each OCT/HE pair, the app creates an output folder named after the sample fi
 coregistration_outputs/interactive_app/sample_name__he_section_name/
 ```
 
+The `coregistration_outputs` folder is created inside the same local folder where this repository is stored. For example, if you place the app at:
+
+```text
+/Users/yourname/Desktop/OCT_HE_align_interact_v5
+```
+
+the outputs will be written to:
+
+```text
+/Users/yourname/Desktop/OCT_HE_align_interact_v5/coregistration_outputs
+```
+
+No hard-coded computer-specific path is required.
+
 If the same sample is run more than once, the app adds a suffix such as `_02`.
 
 Important output files include:
