@@ -98,12 +98,96 @@ def _session(session_id: str) -> SessionPaths:
     if not manifest.exists():
         raise FileNotFoundError(f"Unknown session: {session_id}")
     data = json.loads(manifest.read_text())
-    return SessionPaths(root=root, oct_path=Path(data["oct_path"]), he_path=Path(data["he_path"]))
+    session_root = Path(data.get("root", root))
+    return SessionPaths(root=session_root, oct_path=Path(data["oct_path"]), he_path=Path(data["he_path"]))
 
 
 def _write_session(root: Path, oct_path: Path, he_path: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "session.json").write_text(json.dumps({"oct_path": str(oct_path), "he_path": str(he_path)}, indent=2))
+    (root / "session.json").write_text(json.dumps({"root": str(root), "oct_path": str(oct_path), "he_path": str(he_path)}, indent=2))
+
+
+def _write_session_alias(alias_root: Path, output_root: Path, oct_path: Path, he_path: Path) -> None:
+    alias_root.mkdir(parents=True, exist_ok=True)
+    (alias_root / "session.json").write_text(
+        json.dumps({"root": str(output_root), "oct_path": str(oct_path), "he_path": str(he_path)}, indent=2)
+    )
+
+
+def _paths_from_processed_output(sample_dir: Path) -> tuple[Path, Path]:
+    session_manifest = sample_dir / "session.json"
+    if session_manifest.exists():
+        data = json.loads(session_manifest.read_text())
+        return Path(data["oct_path"]), Path(data["he_path"])
+    summary_path = sample_dir / "alignment_summary.json"
+    if summary_path.exists():
+        data = json.loads(summary_path.read_text())
+        if "oct_path" in data and "he_path" in data:
+            return Path(data["oct_path"]), Path(data["he_path"])
+    raise FileNotFoundError("Processed sample is missing session.json or alignment_summary.json with OCT/HE paths")
+
+
+def _scan_processed_outputs(output_root: Path) -> list[dict[str, str]]:
+    samples: list[dict[str, str]] = []
+    if not output_root.exists() or not output_root.is_dir():
+        raise FileNotFoundError("Processed output directory does not exist")
+    markers = {"overlay_preview.png", "alignment_summary.json", "session.json", "he_registered.tiff"}
+    candidate_dirs = [output_root] + sorted(p for p in output_root.rglob("*") if p.is_dir())
+    for sample_dir in candidate_dirs:
+        names = {child.name for child in sample_dir.iterdir() if child.is_file()}
+        if not markers.intersection(names):
+            continue
+        if not ((sample_dir / "he_registered.tiff").exists() or (sample_dir / "output" / "he_registered.tiff").exists()):
+            continue
+        rel = sample_dir.relative_to(output_root)
+        label = output_root.name if str(rel) == "." else str(rel)
+        samples.append({"name": label, "path": str(sample_dir)})
+    return samples
+
+
+def _known_output_files(root: Path) -> list[str]:
+    names = [
+        "oct_raw_display_preview.png",
+        "oct_flatfield_corrected_preview.png",
+        "oct_tile_artifact_suppressed_preview.png",
+        "oct_registered_preview.png",
+        "he_standardized_native_preview.png",
+        "he_black_white_input_preview.png",
+        "oct_mask_overlay.png",
+        "he_mask_overlay.png",
+        "oct_mask_edit.png",
+        "he_mask_edit.png",
+        "oct_search_feature.png",
+        "he_search_bw.png",
+        "overlay_preview.png",
+        "registered_mask_preview.png",
+        "he_registered_masked_preview.png",
+        "oct_registered_masked_preview.png",
+        "he_registered.tiff",
+        "oct_registered.tiff",
+        "registered_mask.tiff",
+        "output/he_registered.tiff",
+        "output/oct_registered.tiff",
+        "output/registered_mask.tiff",
+    ]
+    return [name for name in names if (root / name).exists()]
+
+
+def _processed_state(root: Path) -> dict[str, Any]:
+    state: dict[str, Any] = {}
+    transform_path = root / "transform_state.json"
+    if transform_path.exists():
+        try:
+            state["transform_state"] = json.loads(transform_path.read_text())
+        except Exception:
+            state["transform_state"] = None
+    mask_state_path = root / "mask_state.json"
+    if mask_state_path.exists():
+        try:
+            state["mask_state"] = json.loads(mask_state_path.read_text())
+        except Exception:
+            state["mask_state"] = None
+    return state
 
 
 def _clean_stem(path: Path, suffixes: tuple[str, ...]) -> str:
@@ -791,6 +875,17 @@ HTML = r"""
     <div id="batchResults" class="batch-results"></div>
   </section>
   <section>
+    <h2>Load Processed Output</h2>
+    <div class="grid">
+      <div><label>Pipeline output directory</label><input id="processedRoot" type="text" placeholder="/path/to/OCT_HE_align_interact_v5/coregistration_outputs/interactive_app"></div>
+      <div><label>Processed sample</label><select id="processedSample"><option value="">Scan an output directory first</option></select></div>
+    </div>
+    <button onclick="scanProcessedOutputs()">Scan Output Directory</button>
+    <button onclick="loadProcessedSample()">Load Selected Sample</button>
+    <div id="busy-processed" class="busy"><progress></progress> Loading processed outputs...</div>
+    <div class="small">Use this to reopen a sample that was already processed by this app. If transform information is available, you can adjust registration in Step 4 and save again.</div>
+  </section>
+  <section>
     <h2>1. Load Images</h2>
     <div class="grid">
       <div><label>OCT path</label><input id="octPath" type="text" placeholder="/path/to/sample_oct.tiff"></div>
@@ -810,6 +905,7 @@ HTML = r"""
     <label>HE stain/color standardization</label>
     <select id="stain"><option value="torchstain_reinhard">torchstain Reinhard</option><option value="torchstain_macenko">torchstain Macenko</option><option value="none">None</option></select>
     <button onclick="preprocess()">Preprocess Images</button>
+    <button onclick="runAllProcessing()">Run All Processing And Save</button>
     <div id="busy-preprocess" class="busy"><progress></progress> Preprocessing OCT and HE images...</div>
     <h3>OCT preprocessing</h3>
     <div class="viewer">
@@ -875,6 +971,11 @@ async function api(path, body){ const r=await fetch(path,{method:'POST',headers:
 function img(name){ return `/api/file?session=${sessionId}&name=${name}&t=${Date.now()}`; }
 function setBusy(id, on){ const el=document.getElementById(id); if(el) el.classList.toggle('active', on); document.querySelectorAll('button').forEach(b=>b.disabled=on); }
 async function withBusy(id, label, fn){ setBusy(id,true); setStatus(label); try { const out=await fn(); return out; } catch(e) { setStatus('Error: '+e.message); throw e; } finally { setBusy(id,false); } }
+function showProcessedImages(files){ if(files.includes('oct_raw_display_preview.png')) octRaw.src=img('oct_raw_display_preview.png'); if(files.includes('oct_flatfield_corrected_preview.png')) octFlat.src=img('oct_flatfield_corrected_preview.png'); if(files.includes('oct_tile_artifact_suppressed_preview.png')) octTile.src=img('oct_tile_artifact_suppressed_preview.png'); if(files.includes('oct_registered_preview.png')) octPre.src=img('oct_registered_preview.png'); if(files.includes('he_standardized_native_preview.png')) hePre.src=img('he_standardized_native_preview.png'); if(files.includes('he_black_white_input_preview.png')) heBW.src=img('he_black_white_input_preview.png'); if(files.includes('oct_mask_overlay.png')) octMaskOverlay.src=img('oct_mask_overlay.png'); if(files.includes('he_mask_overlay.png')) heMaskOverlay.src=img('he_mask_overlay.png'); if(files.includes('overlay_preview.png')) overlay.src=img('overlay_preview.png'); if(files.includes('registered_mask_preview.png')) maskReg.src=img('registered_mask_preview.png'); }
+function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; mScale.value=manual.scale ?? 1; mRot.value=manual.rotation_deg ?? 0; mTy.value=manual.translation_y ?? 0; mTx.value=manual.translation_x ?? 0; mScaleV.textContent=mScale.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; }
+function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
+async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
+async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_search_feature.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_search_bw.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); if(files.includes('he_registered_masked_preview.png')&&files.includes('oct_registered_masked_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}`); }); }
 function batchImg(record){ return `/api/file?session=${encodeURIComponent(record.session_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ status.textContent='No batch run started.'; return; } status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
 async function pollBatch(){ if(!batchId)return; const job=await api('/api/batch_status',{batch_id:batchId}); renderBatch(job); const running=job.status==='queued'||job.status==='running'; setBusy('busy-batch', running); if(running){ batchTimer=setTimeout(pollBatch,2500); } else { setStatus(`Batch ${batchId} complete. Review overlays and uncheck any outputs to delete.`); } }
@@ -883,6 +984,7 @@ async function applyBatchKeepChoices(){ if(!batchId){ setStatus('No batch run to
 async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value}); sessionId=j.session_id; setStatus('Loaded session '+sessionId); }); }
 async function uploadFiles(){ await withBusy('busy-load','Uploading files...', async()=>{ const fd=new FormData(); fd.append('oct', octFile.files[0]); fd.append('he', heFile.files[0]); const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); sessionId=j.session_id; setStatus('Uploaded session '+sessionId); }); }
 async function preprocess(){ await withBusy('busy-preprocess','Preprocessing OCT and HE...', async()=>{ const j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); setStatus(JSON.stringify(j,null,2)); }); }
+async function runAllProcessing(){ await withBusy('busy-preprocess','Running full pipeline...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); let j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); octMaskOverlay.src=img('oct_mask_overlay.png'); heMaskOverlay.src=img('he_mask_overlay.png'); await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); await saveMasks(); j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(`Full processing complete.\nOutput: ${j.output_dir}`); }); }
 async function removeBackground(){ await withBusy('busy-mask','Removing background...', async()=>{ const j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); octMaskOverlay.src=img('oct_mask_overlay.png'); heMaskOverlay.src=img('he_mask_overlay.png'); await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); setStatus(JSON.stringify(j,null,2)); }); }
 function imageLoad(src){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; }); }
 async function loadCanvas(id, maskName, baseName, color){ const c=document.getElementById(id); const base=await imageLoad(img(baseName)); const mask=await imageLoad(img(maskName)); c.width=base.width; c.height=base.height; const maskCanvas=document.createElement('canvas'); maskCanvas.width=base.width; maskCanvas.height=base.height; const mctx=maskCanvas.getContext('2d'); mctx.drawImage(mask,0,0,base.width,base.height); editors[id]={base,maskCanvas,maskCtx:mctx,color,history:[]}; redrawEditor(id); setupDraw(c); }
@@ -937,7 +1039,32 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             parsed = urlparse(self.path)
-            if parsed.path == "/api/batch_start":
+            if parsed.path == "/api/processed_scan":
+                payload = _read_json(self)
+                output_root = Path(payload["output_root"]).expanduser().resolve()
+                samples = _scan_processed_outputs(output_root)
+                _json_response(self, {"output_root": str(output_root), "samples": samples})
+            elif parsed.path == "/api/processed_load":
+                payload = _read_json(self)
+                sample_dir = Path(payload["sample_dir"]).expanduser().resolve()
+                if not sample_dir.exists() or not sample_dir.is_dir():
+                    raise FileNotFoundError("Processed sample folder does not exist")
+                oct_path, he_path = _paths_from_processed_output(sample_dir)
+                session_id, alias_root = _unique_session_root(f"loaded_{_slug(sample_dir.name)}")
+                _write_session_alias(alias_root, sample_dir, oct_path, he_path)
+                files = _known_output_files(sample_dir)
+                _json_response(
+                    self,
+                    {
+                        "session_id": session_id,
+                        "sample_name": sample_dir.name,
+                        "output_dir": str(sample_dir),
+                        "files": files,
+                        "state": _processed_state(sample_dir),
+                        "can_manual_adjust": (sample_dir / "transform_state.json").exists(),
+                    },
+                )
+            elif parsed.path == "/api/batch_start":
                 payload = _read_json(self)
                 input_root = Path(payload["input_root"]).expanduser().resolve()
                 workers = max(1, min(16, int(payload.get("workers", 4))))

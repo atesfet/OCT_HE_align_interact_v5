@@ -132,12 +132,23 @@ If macOS blocks the file because it was downloaded from the internet, right-clic
 ## How To Use The App
 
 1. Load images: choose an OCT image and an HE image by file path or upload.
-2. Preprocess: run modality-specific preprocessing for OCT and HE.
+2. Preprocess: run modality-specific preprocessing for OCT and HE, or click `Run All Processing And Save` to run all remaining steps automatically.
 3. Remove background: generate OCT and HE tissue masks.
 4. Edit masks: add or erase tissue regions directly on the overlays if needed.
 5. Auto-register: run automatic HE-to-OCT alignment.
 6. Manually adjust: fine-tune scale, rotation, translation, and HE opacity if needed.
 7. Save: save the final registered OCT, registered HE, and overlap mask.
+
+## Loading A Previously Processed Sample
+
+Use the `Load Processed Output` section to reopen a case that was already processed by this app.
+
+1. Enter the pipeline output directory, usually something inside `coregistration_outputs/interactive_app` or a batch output folder.
+2. Click `Scan Output Directory`.
+3. Pick the processed sample from the dropdown menu.
+4. Click `Load Selected Sample`.
+
+The app will automatically fill all available previews, masks, registration overlays, save links, and manual adjustment controls. If the processed sample includes `transform_state.json`, you can make manual alignment adjustments and save again.
 
 ## Batch Processing
 
