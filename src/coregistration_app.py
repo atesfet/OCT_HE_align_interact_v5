@@ -258,6 +258,8 @@ def _known_output_files(root: Path) -> list[str]:
         "he_registered_masked_preview.png",
         "oct_registered_masked_preview.png",
         "he_autoreg_preview.png",
+        "he_autoreg_mask_preview.png",
+        "oct_mask_preview.png",
         "he_registered.tiff",
         "oct_registered.tiff",
         "registered_mask.tiff",
@@ -394,6 +396,8 @@ def _ensure_interactive_artifacts(paths: SessionPaths) -> list[str]:
         "he_registered_masked_preview.png",
         "oct_registered_masked_preview.png",
         "he_autoreg_preview.png",
+        "he_autoreg_mask_preview.png",
+        "oct_mask_preview.png",
     ]
     if any(not (paths.root / name).exists() for name in required_registration_previews):
         _apply_current_transform(paths)
@@ -951,6 +955,7 @@ def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any
     he_mask_native = _resize_mask(he_mask, he_standardized.shape[:2])
     oct_mask = _resize_mask(_load_mask_png(paths.root / "oct_mask_edit.png"), output_shape)
     auto_he = _warp(he_standardized.astype(np.float32), native_matrix, output_shape, order=1)
+    auto_he_mask = _warp(he_mask_native.astype(np.float32), native_matrix, output_shape, order=0) > 0.5
     warped_he = _warp(he_standardized.astype(np.float32), matrix, output_shape, order=1)
     warped_he_mask = _warp(he_mask_native.astype(np.float32), matrix, output_shape, order=0) > 0.5
     overlap = warped_he_mask & oct_mask
@@ -959,6 +964,8 @@ def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any
     _save_mask_tiff(paths.root / "registered_mask.tiff", overlap)
     _save_rgb_png(paths.root / "he_registered_preview.png", warped_he)
     _save_rgb_png(paths.root / "he_autoreg_preview.png", auto_he)
+    _save_gray_png(paths.root / "he_autoreg_mask_preview.png", auto_he_mask.astype(np.float32))
+    _save_gray_png(paths.root / "oct_mask_preview.png", oct_mask.astype(np.float32))
     _save_gray_png(paths.root / "registered_mask_preview.png", overlap.astype(np.float32))
     _save_rgb_png(paths.root / "he_registered_masked_preview.png", warped_he * overlap[..., None].astype(np.float32))
     _save_gray_png(paths.root / "oct_registered_masked_preview.png", oct_registered * overlap.astype(np.float32))
@@ -1271,7 +1278,7 @@ HTML = r"""
     <div class="slider-row"><label>Translate X</label><input id="mTx" type="range" min="-2000" max="2000" value="0" step="1" oninput="manualAdjust()"><input id="mTxV" class="value-input" type="number" value="0" step="1" oninput="manualNumberAdjust('mTx','mTxV')"></div>
     <div class="slider-row"><label>HE opacity</label><input id="heOpacity" type="range" min="0" max="1" value="0.65" step="0.01" oninput="drawLiveOverlay()"><input id="heOpacityV" class="value-input" type="number" min="0" max="1" value="0.65" step="0.01" oninput="opacityNumberAdjust()"></div>
     <div class="viewer">
-      <div><b>Live backend overlay/QC</b><br><canvas id="liveOverlay" class="mask-editor"></canvas></div>
+      <div><b>Live backend-style overlay/QC</b><br><canvas id="liveOverlay" class="mask-editor"></canvas></div>
       <div class="image-card"><div class="caption">Backend overlay/QC</div><img id="overlay"></div>
       <div class="image-card"><div class="caption">Registered mask</div><img id="maskReg"></div>
     </div>
@@ -1300,7 +1307,7 @@ function opacityNumberAdjust(){ const v=Math.max(0,Math.min(1,parseFloat(heOpaci
 function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; fitSliderToValue(mScale,manual.scale ?? 1); fitSliderToValue(mStretchX,manual.stretch_x ?? 1); fitSliderToValue(mStretchY,manual.stretch_y ?? 1); fitSliderToValue(mRot,manual.rotation_deg ?? 0); fitSliderToValue(mTy,manual.translation_y ?? 0); fitSliderToValue(mTx,manual.translation_x ?? 0); updateManualDisplays(); }
 function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
 async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
-async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_mask_editor_base.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_mask_editor_base.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); if(files.includes('overlay_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
+async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_mask_editor_base.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_mask_editor_base.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); if(files.includes('he_autoreg_preview.png')&&files.includes('oct_registered_preview.png')&&files.includes('he_autoreg_mask_preview.png')&&files.includes('oct_mask_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
 function batchImg(record){ return `/api/batch_file?batch=${encodeURIComponent(batchId||'')}&case=${encodeURIComponent(record.case_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function updateBatchProgress(job){ const total=Number(job?.total||0); const completed=Number(job?.completed||0); const progress=document.getElementById('batchProgress'); const text=document.getElementById('batchProgressText'); if(progress){ progress.max=Math.max(total,1); progress.value=Math.min(completed,total); } if(text){ const remaining=Math.max(total-completed,0); text.textContent=`Detected ${total} sample${total===1?'':'s'}. Completed ${completed}. Remaining ${remaining}.`; } }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ updateBatchProgress(null); status.textContent='No batch run started.'; if(results)results.innerHTML=''; return; } updateBatchProgress(job); status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); if(!cards.length){ results.innerHTML='<div class="small">Waiting for the first completed sample preview...</div>'; return; } results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img loading="lazy" decoding="async" src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
@@ -1321,11 +1328,11 @@ function canvasData(id){ const ed=editors[id]; return ed ? ed.maskCanvas.toDataU
 async function saveMasks(){ const j=await api('/api/save_masks',{session_id:sessionId,oct_mask:canvasData('octCanvas'),he_mask:canvasData('heCanvas')}); setStatus(JSON.stringify(j,null,2)); }
 async function autoRegister(){ await withBusy('busy-autoreg',`Running ${autoregMode.value} auto registration...`, async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId,mode:autoregMode.value}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
 function manualPayload(){ return {session_id:sessionId,scale:parseFloat(mScale.value),stretch_x:parseFloat(mStretchX.value),stretch_y:parseFloat(mStretchY.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value)}; }
-function manualAdjust(){ updateManualDisplays(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Applying manual adjustment to native outputs...'); await api('/api/manual',manualPayload()); await refreshReg(); setStatus('Manual adjustment applied.'); },650); }
-async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.overlay=await imageLoad(img('overlay_preview.png')); initLiveCanvas(); drawLiveOverlay(); }
-function initLiveCanvas(){ if(!liveImages.overlay)return; liveOverlay.width=liveImages.overlay.width; liveOverlay.height=liveImages.overlay.height; }
-function drawLiveOverlay(){ heOpacityV.value=heOpacity.value; if(!liveImages.overlay)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.overlay.width){initLiveCanvas();} ctx.clearRect(0,0,c.width,c.height); ctx.globalAlpha=1; ctx.drawImage(liveImages.overlay,0,0,c.width,c.height); }
-async function saveFinal(){ await withBusy('busy-save','Saving final outputs...', async()=>{ const j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(JSON.stringify(j,null,2)); }); }
+function manualAdjust(){ updateManualDisplays(); drawLiveOverlay(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Stored manual adjustment. Native outputs will update when you click Save Final.'); await api('/api/manual',manualPayload()); },250); }
+async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.he=await imageLoad(img('he_autoreg_preview.png')); liveImages.oct=await imageLoad(img('oct_registered_preview.png')); liveImages.heMask=await imageLoad(img('he_autoreg_mask_preview.png')); liveImages.octMask=await imageLoad(img('oct_mask_preview.png')); initLiveCanvas(); drawLiveOverlay(); }
+function initLiveCanvas(){ if(!liveImages.oct)return; liveOverlay.width=liveImages.oct.width; liveOverlay.height=liveImages.oct.height; }
+function drawLiveOverlay(){ heOpacityV.value=heOpacity.value; if(!liveImages.he||!liveImages.oct||!liveImages.heMask||!liveImages.octMask)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.oct.width){initLiveCanvas();} const w=c.width,h=c.height; const heCanvas=document.createElement('canvas'); heCanvas.width=w; heCanvas.height=h; const heCtx=heCanvas.getContext('2d'); heCtx.save(); heCtx.translate(w/2+parseFloat(mTx.value),h/2+parseFloat(mTy.value)); heCtx.rotate(parseFloat(mRot.value)*Math.PI/180); const s=parseFloat(mScale.value); heCtx.scale(s*parseFloat(mStretchX.value),s*parseFloat(mStretchY.value)); heCtx.drawImage(liveImages.he,-w/2,-h/2,w,h); heCtx.restore(); const hmCanvas=document.createElement('canvas'); hmCanvas.width=w; hmCanvas.height=h; const hmCtx=hmCanvas.getContext('2d'); hmCtx.save(); hmCtx.translate(w/2+parseFloat(mTx.value),h/2+parseFloat(mTy.value)); hmCtx.rotate(parseFloat(mRot.value)*Math.PI/180); hmCtx.scale(s*parseFloat(mStretchX.value),s*parseFloat(mStretchY.value)); hmCtx.drawImage(liveImages.heMask,-w/2,-h/2,w,h); hmCtx.restore(); const octCanvas=document.createElement('canvas'); octCanvas.width=w; octCanvas.height=h; const octCtx=octCanvas.getContext('2d'); octCtx.drawImage(liveImages.oct,0,0,w,h); const omCanvas=document.createElement('canvas'); omCanvas.width=w; omCanvas.height=h; const omCtx=omCanvas.getContext('2d'); omCtx.drawImage(liveImages.octMask,0,0,w,h); const he=heCtx.getImageData(0,0,w,h); const hm=hmCtx.getImageData(0,0,w,h); const oct=octCtx.getImageData(0,0,w,h); const om=omCtx.getImageData(0,0,w,h); const out=ctx.createImageData(w,h); for(let i=0;i<out.data.length;i+=4){ const octV=oct.data[i]/255; const inMask=hm.data[i]>127&&om.data[i]>127; out.data[i]=Math.min(255,he.data[i]*0.82); out.data[i+1]=Math.min(255,Math.max(he.data[i+1]*0.82,octV*0.95*255)); out.data[i+2]=Math.min(255,Math.max(he.data[i+2]*0.82,octV*0.35*255)); if(!inMask){ out.data[i]*=0.82; out.data[i+1]*=0.82; out.data[i+2]*=0.82; } out.data[i+3]=255; } ctx.putImageData(out,0,0); }
+async function saveFinal(){ await withBusy('busy-save','Saving final outputs...', async()=>{ const j=await api('/api/save',{session_id:sessionId}); overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(JSON.stringify(j,null,2)); }); }
 </script>
 </body>
 </html>
@@ -1522,11 +1529,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     "translation_x": float(payload.get("translation_x", 0.0)),
                 }
                 (paths.root / "transform_state.json").write_text(json.dumps(state, indent=2))
-                _apply_current_transform(paths, state)
                 _json_response(self, {"ok": True, "manual": state["manual"]})
             elif parsed.path == "/api/save":
                 payload = _read_json(self)
                 paths = _session(payload["session_id"])
+                if (paths.root / "transform_state.json").exists():
+                    _apply_current_transform(paths)
                 _sync_clean_outputs(paths)
                 files = [
                     "output/he_registered.tiff",
