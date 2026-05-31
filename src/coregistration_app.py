@@ -92,6 +92,19 @@ def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     return json.loads(handler.rfile.read(length).decode("utf-8"))
 
 
+def _clean_user_path_value(value: Any) -> str:
+    """Normalize paths pasted from shells/Finder, including surrounding quotes."""
+    text = str(value or "").strip()
+    quote_pairs = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+    while len(text) >= 2 and text[0] in quote_pairs and text[-1] == quote_pairs[text[0]]:
+        text = text[1:-1].strip()
+    return text
+
+
+def _user_path(value: Any) -> Path:
+    return Path(_clean_user_path_value(value)).expanduser().resolve()
+
+
 def _session(session_id: str) -> SessionPaths:
     root = APP_ROOT / session_id
     manifest = root / "session.json"
@@ -252,9 +265,9 @@ def _unique_child_root(parent: Path, session_id: str) -> tuple[str, Path]:
 
 
 def _specified_output_root(value: str | None, default_parent: Path = APP_ROOT) -> Path:
-    if value is None or not str(value).strip():
+    if value is None or not _clean_user_path_value(value):
         return default_parent
-    return Path(str(value)).expanduser().resolve()
+    return _user_path(value)
 
 
 def _session_root_for_output(parent: Path, session_id: str, overwrite: bool = False) -> tuple[str, Path]:
@@ -1065,12 +1078,12 @@ class AppHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/api/processed_scan":
                 payload = _read_json(self)
-                output_root = Path(payload["output_root"]).expanduser().resolve()
+                output_root = _user_path(payload["output_root"])
                 samples = _scan_processed_outputs(output_root)
                 _json_response(self, {"output_root": str(output_root), "samples": samples})
             elif parsed.path == "/api/processed_load":
                 payload = _read_json(self)
-                sample_dir = Path(payload["sample_dir"]).expanduser().resolve()
+                sample_dir = _user_path(payload["sample_dir"])
                 if not sample_dir.exists() or not sample_dir.is_dir():
                     raise FileNotFoundError("Processed sample folder does not exist")
                 oct_path, he_path = _paths_from_processed_output(sample_dir)
@@ -1090,14 +1103,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
             elif parsed.path == "/api/batch_start":
                 payload = _read_json(self)
-                input_root = Path(payload["input_root"]).expanduser().resolve()
+                input_root = _user_path(payload["input_root"])
                 overwrite = bool(payload.get("overwrite", False))
                 workers = max(1, min(16, int(payload.get("workers", 4))))
                 if not input_root.exists() or not input_root.is_dir():
                     raise FileNotFoundError("Batch input folder does not exist")
-                requested_output_root = str(payload.get("output_root", "")).strip()
+                requested_output_root = _clean_user_path_value(payload.get("output_root", ""))
                 if requested_output_root:
-                    batch_root = Path(requested_output_root).expanduser().resolve()
+                    batch_root = _user_path(requested_output_root)
                     batch_id = _slug(batch_root.name)
                 else:
                     batch_base = f"batch_{_slug(input_root.name)}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -1166,8 +1179,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"session_id": session_id, "output_dir": str(root), "oct_path": str(oct_path), "he_path": str(he_path)})
             elif parsed.path == "/api/load_paths":
                 payload = _read_json(self)
-                oct_path = Path(payload["oct_path"]).expanduser().resolve()
-                he_path = Path(payload["he_path"]).expanduser().resolve()
+                oct_path = _user_path(payload["oct_path"])
+                he_path = _user_path(payload["he_path"])
                 if not oct_path.exists() or not he_path.exists():
                     raise FileNotFoundError("OCT or HE path does not exist")
                 output_parent = _specified_output_root(payload.get("output_root"))
