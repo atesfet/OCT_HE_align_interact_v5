@@ -428,6 +428,31 @@ def _sync_clean_outputs(paths: SessionPaths) -> None:
             shutil.copy2(src, output_dir / name)
 
 
+def _send_file(handler: BaseHTTPRequestHandler, root: Path, name: str) -> None:
+    root = root.resolve()
+    file_path = (root / name).resolve()
+    if root not in file_path.parents and file_path != root:
+        raise PermissionError("Invalid file path")
+    data = file_path.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _batch_output_dir(batch_id: str, case_id: str) -> Path:
+    with BATCH_LOCK:
+        job = BATCH_JOBS.get(batch_id)
+        if not job:
+            raise FileNotFoundError(f"Unknown batch: {batch_id}")
+        for collection in (job.get("results", []), job.get("cases", [])):
+            for item in collection:
+                if item.get("case_id") == case_id:
+                    return Path(item["output_dir"])
+    raise FileNotFoundError(f"Unknown batch case: {case_id}")
+
+
 def _preview_image(image: np.ndarray, max_dim: int = 1200) -> np.ndarray:
     shape = image.shape[:2]
     if max(shape) <= max_dim:
@@ -1012,7 +1037,7 @@ function hydrateManualControls(state){ const manual=(state&&state.transform_stat
 function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
 async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
 async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_search_feature.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_search_bw.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); if(files.includes('he_registered_masked_preview.png')&&files.includes('oct_registered_masked_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}`); }); }
-function batchImg(record){ return `/api/file?session=${encodeURIComponent(record.session_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
+function batchImg(record){ return `/api/batch_file?batch=${encodeURIComponent(batchId||'')}&case=${encodeURIComponent(record.case_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function updateBatchProgress(job){ const total=Number(job?.total||0); const completed=Number(job?.completed||0); const progress=document.getElementById('batchProgress'); const text=document.getElementById('batchProgressText'); if(progress){ progress.max=Math.max(total,1); progress.value=Math.min(completed,total); } if(text){ const remaining=Math.max(total-completed,0); text.textContent=`Detected ${total} sample${total===1?'':'s'}. Completed ${completed}. Remaining ${remaining}.`; } }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ updateBatchProgress(null); status.textContent='No batch run started.'; if(results)results.innerHTML=''; return; } updateBatchProgress(job); status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); if(!cards.length){ results.innerHTML='<div class="small">Waiting for the first completed sample preview...</div>'; return; } results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img loading="lazy" decoding="async" src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
 async function pollBatch(){ if(!batchId)return; const job=await api('/api/batch_status',{batch_id:batchId}); renderBatch(job); const running=job.status==='queued'||job.status==='running'; setBusy('busy-batch', running); if(running){ batchTimer=setTimeout(pollBatch,2500); } else { setStatus(`Batch ${batchId} complete. Review overlays and uncheck any outputs to delete.`); } }
@@ -1059,15 +1084,17 @@ class AppHandler(BaseHTTPRequestHandler):
             name = qs.get("name", [""])[0]
             try:
                 paths = _session(session_id)
-                file_path = (paths.root / name).resolve()
-                if paths.root.resolve() not in file_path.parents and file_path != paths.root.resolve():
-                    raise PermissionError("Invalid file path")
-                data = file_path.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                _send_file(self, paths.root, name)
+            except Exception as exc:
+                _json_response(self, {"error": str(exc)}, 404)
+            return
+        if parsed.path == "/api/batch_file":
+            qs = parse_qs(parsed.query)
+            batch_id = qs.get("batch", [""])[0]
+            case_id = qs.get("case", [""])[0]
+            name = qs.get("name", [""])[0]
+            try:
+                _send_file(self, _batch_output_dir(batch_id, case_id), name)
             except Exception as exc:
                 _json_response(self, {"error": str(exc)}, 404)
             return
