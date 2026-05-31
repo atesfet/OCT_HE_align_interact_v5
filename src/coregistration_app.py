@@ -805,47 +805,16 @@ def _build_search_maps(paths: SessionPaths) -> tuple[dict[str, np.ndarray], dict
     return oct_maps, he_maps, search_shape, he_raw, oct_pre["contrast"]
 
 
-def _registration_budget(mode: str) -> dict[str, Any]:
-    mode = str(mode or "balanced").lower()
-    if mode == "fast":
-        return {
-            "mode": "fast",
-            "scale_multipliers": [0.92, 1.0, 1.10],
-            "rotation_deltas": [-10.0, 0.0, 10.0],
-            "tilts": [(0.0, 0.0)],
-            "top_n": 3,
-            "maxiter": 18,
-        }
-    if mode == "thorough":
-        return {
-            "mode": "thorough",
-            "scale_multipliers": [0.70, 0.78, 0.86, 0.92, 1.0, 1.10, 1.24, 1.38],
-            "rotation_deltas": [-45.0, -25.0, -10.0, 0.0, 10.0, 25.0, 45.0],
-            "tilts": [(0.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (0.0, -3.0), (0.0, 3.0)],
-            "top_n": 10,
-            "maxiter": 56,
-        }
-    return {
-        "mode": "balanced",
-        "scale_multipliers": [0.78, 0.92, 1.0, 1.10, 1.24],
-        "rotation_deltas": [-25.0, -10.0, 0.0, 10.0, 25.0],
-        "tilts": [(0.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (0.0, -3.0), (0.0, 3.0)],
-        "top_n": 6,
-        "maxiter": 36,
-    }
-
-
-def _estimate_registration(paths: SessionPaths, mode: str = "balanced") -> dict[str, Any]:
-    budget = _registration_budget(mode)
+def _estimate_registration(paths: SessionPaths) -> dict[str, Any]:
     oct_maps, he_maps, search_shape, he_raw, oct_registered = _build_search_maps(paths)
     oct_center = _mask_center(oct_maps["mask"])
     he_center = _mask_center(he_maps["mask"])
     area_scale = math.sqrt(max(1.0, oct_maps["mask"].sum()) / max(1.0, he_maps["mask"].sum()))
     init_rotation = float(np.clip(_orientation(oct_maps["mask"]) - _orientation(he_maps["mask"]), -60.0, 60.0))
     seeds: list[np.ndarray] = []
-    for scale_mult in budget["scale_multipliers"]:
-        for rot_delta in budget["rotation_deltas"]:
-            for tilt_x, tilt_y in budget["tilts"]:
+    for scale_mult in [0.78, 0.92, 1.0, 1.10, 1.24]:
+        for rot_delta in [-25.0, -10.0, 0.0, 10.0, 25.0]:
+            for tilt_x, tilt_y in [(0.0, 0.0), (-3.0, 0.0), (3.0, 0.0), (0.0, -3.0), (0.0, 3.0)]:
                 seeds.append(np.array([area_scale * scale_mult, init_rotation + rot_delta, tilt_x, tilt_y, 0.0, 0.0], dtype=np.float64))
 
     ranked: list[tuple[float, np.ndarray]] = []
@@ -873,8 +842,8 @@ def _estimate_registration(paths: SessionPaths, mode: str = "balanced") -> dict[
         score, _ = _score(oct_maps, moved)
         return -score
 
-    for _, seed in ranked[: int(budget["top_n"])]:
-        result = optimize.minimize(objective, seed, method="Powell", options={"maxiter": int(budget["maxiter"]), "disp": False})
+    for _, seed in ranked[:6]:
+        result = optimize.minimize(objective, seed, method="Powell", options={"maxiter": 36, "disp": False})
         params = result.x if result.success else seed
         matrix = _affine_with_tilt(params[0], params[1], params[2], params[3], params[4], params[5], he_center, oct_center)
         moved = _warp_maps(he_maps, matrix, search_shape)
@@ -898,10 +867,6 @@ def _estimate_registration(paths: SessionPaths, mode: str = "balanced") -> dict[
             "translation_x": float(best_params[5]),
             "score": best_score,
             "details": best_details,
-            "search_mode": budget["mode"],
-            "seed_count": len(seeds),
-            "refined_seed_count": int(budget["top_n"]),
-            "optimizer_maxiter": int(budget["maxiter"]),
         },
         "native_matrix": native.tolist(),
         "manual": {"scale": 1.0, "stretch_x": 1.0, "stretch_y": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
@@ -1260,7 +1225,6 @@ HTML = r"""
   </section>
   <section>
     <h2>4. Auto Registration And Manual Adjustment</h2>
-    <div><label>Autoregistration search mode</label><select id="autoregMode"><option value="balanced">Balanced (default)</option><option value="fast">Fast</option><option value="thorough">Thorough</option></select></div>
     <button onclick="autoRegister()">Run Auto Registration</button>
     <button class="secondary" onclick="applyManualToNative()">Apply Manual To Native Outputs</button>
     <div id="busy-autoreg" class="busy"><progress></progress> Running auto-registration and applying native-resolution transform...</div>
@@ -1272,7 +1236,7 @@ HTML = r"""
     <div class="slider-row"><label>Translate X</label><input id="mTx" type="range" min="-2000" max="2000" value="0" step="1" oninput="manualAdjust()"><input id="mTxV" class="value-input" type="number" value="0" step="1" oninput="manualNumberAdjust('mTx','mTxV')"></div>
     <div class="slider-row"><label>HE opacity</label><input id="heOpacity" type="range" min="0" max="1" value="0.65" step="0.01" oninput="drawLiveOverlay()"><input id="heOpacityV" class="value-input" type="number" min="0" max="1" value="0.65" step="0.01" oninput="opacityNumberAdjust()"></div>
     <div class="viewer">
-      <div><b>Live original-image overlay (unmasked HE)</b><br><canvas id="liveOverlay" class="mask-editor"></canvas></div>
+      <div><b>Live original-image overlay</b><br><canvas id="liveOverlay" class="mask-editor"></canvas></div>
       <div class="image-card"><div class="caption">Backend overlay/QC</div><img id="overlay"></div>
       <div class="image-card"><div class="caption">Registered mask</div><img id="maskReg"></div>
     </div>
@@ -1311,7 +1275,7 @@ async function applyBatchKeepChoices(){ if(!batchId){ setStatus('No batch run to
 async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value,output_root:singleOutput.value}); sessionId=j.session_id; setStatus(`Loaded session ${sessionId}\nOutput: ${j.output_dir}`); }); }
 async function uploadFiles(){ await withBusy('busy-load','Uploading files...', async()=>{ const fd=new FormData(); fd.append('oct', octFile.files[0]); fd.append('he', heFile.files[0]); const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); sessionId=j.session_id; setStatus('Uploaded session '+sessionId); }); }
 async function preprocess(){ await withBusy('busy-preprocess','Preprocessing OCT and HE...', async()=>{ const j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); setStatus(JSON.stringify(j,null,2)); }); }
-async function runAllProcessing(){ await withBusy('busy-preprocess','Running full pipeline...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); let j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); await saveMasks(); j=await api('/api/autoreg',{session_id:sessionId,mode:autoregMode.value}); await refreshReg(); j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(`Full processing complete.\nOutput: ${j.output_dir}`); }); }
+async function runAllProcessing(){ await withBusy('busy-preprocess','Running full pipeline...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); let j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); await saveMasks(); j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(`Full processing complete.\nOutput: ${j.output_dir}`); }); }
 async function removeBackground(){ await withBusy('busy-mask','Removing background...', async()=>{ const j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); setStatus(JSON.stringify(j,null,2)); }); }
 function imageLoad(src){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; }); }
 async function loadCanvas(id, maskName, baseName, color){ const c=document.getElementById(id); const base=await imageLoad(img(baseName)); const mask=await imageLoad(img(maskName)); c.width=base.width; c.height=base.height; const maskCanvas=document.createElement('canvas'); maskCanvas.width=base.width; maskCanvas.height=base.height; const mctx=maskCanvas.getContext('2d'); mctx.drawImage(mask,0,0,base.width,base.height); editors[id]={base,maskCanvas,maskCtx:mctx,color,history:[]}; redrawEditor(id); setupDraw(c); }
@@ -1320,7 +1284,7 @@ function setupDraw(c){ let down=false; function paintAt(e){ e.preventDefault(); 
 function undoEdit(id){ const ed=editors[id]; if(!ed||!ed.history.length){ setStatus('Nothing to undo for '+id); return; } ed.maskCtx.putImageData(ed.history.pop(),0,0); redrawEditor(id); setStatus('Undid last edit for '+id); }
 function canvasData(id){ const ed=editors[id]; return ed ? ed.maskCanvas.toDataURL('image/png') : document.getElementById(id).toDataURL('image/png'); }
 async function saveMasks(){ const j=await api('/api/save_masks',{session_id:sessionId,oct_mask:canvasData('octCanvas'),he_mask:canvasData('heCanvas')}); setStatus(JSON.stringify(j,null,2)); }
-async function autoRegister(){ await withBusy('busy-autoreg',`Running ${autoregMode.value} auto registration...`, async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId,mode:autoregMode.value}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
+async function autoRegister(){ await withBusy('busy-autoreg','Running auto registration...', async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
 function manualPayload(){ return {session_id:sessionId,scale:parseFloat(mScale.value),stretch_x:parseFloat(mStretchX.value),stretch_y:parseFloat(mStretchY.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value)}; }
 function manualAdjust(){ updateManualDisplays(); drawLiveOverlay(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; await api('/api/manual',manualPayload()); setStatus('Manual adjustment preview updated. Click Apply Manual To Native Outputs or Save Final to write full-resolution outputs.'); },350); }
 async function applyManualToNative(){ await withBusy('busy-autoreg','Applying manual adjustment to native outputs...', async()=>{ await api('/api/manual',manualPayload()); await api('/api/apply_manual',{session_id:sessionId}); await refreshReg(); setStatus('Manual adjustment applied to native-resolution outputs.'); }); }
@@ -1509,7 +1473,7 @@ class AppHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/autoreg":
                 payload = _read_json(self)
                 paths = _session(payload["session_id"])
-                state = _estimate_registration(paths, payload.get("mode", "balanced"))
+                state = _estimate_registration(paths)
                 _json_response(self, state)
             elif parsed.path == "/api/manual":
                 payload = _read_json(self)
