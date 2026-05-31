@@ -252,7 +252,7 @@ def _rebuild_transform_state_from_summary(paths: SessionPaths, summary: dict[str
             "details": best.get("details", {}),
         },
         "native_matrix": native.tolist(),
-        "manual": {"scale": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
+        "manual": {"scale": 1.0, "stretch_x": 1.0, "stretch_y": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
     }
     (paths.root / "transform_state.json").write_text(json.dumps(transform_state, indent=2))
     return transform_state
@@ -779,16 +779,29 @@ def _estimate_registration(paths: SessionPaths) -> dict[str, Any]:
             "details": best_details,
         },
         "native_matrix": native.tolist(),
-        "manual": {"scale": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
+        "manual": {"scale": 1.0, "stretch_x": 1.0, "stretch_y": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
     }
     (paths.root / "transform_state.json").write_text(json.dumps(transform_state, indent=2))
     _apply_current_transform(paths, transform_state)
     return transform_state
 
 
-def _manual_matrix(shape: tuple[int, int], scale: float, rotation_deg: float, ty: float, tx: float) -> np.ndarray:
-    center = np.array([shape[0] / 2.0, shape[1] / 2.0], dtype=np.float64)
-    return _affine(scale, rotation_deg, ty, tx, center, center)
+def _manual_matrix(shape: tuple[int, int], scale: float, stretch_x: float, stretch_y: float, rotation_deg: float, ty: float, tx: float) -> np.ndarray:
+    center_yx = np.array([shape[0] / 2.0, shape[1] / 2.0], dtype=np.float64)
+    src_xy = np.array([center_yx[1], center_yx[0]], dtype=np.float64)
+    dst_xy = np.array([center_yx[1] + tx, center_yx[0] + ty], dtype=np.float64)
+    theta = math.radians(float(rotation_deg))
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    sx = float(scale) * float(stretch_x)
+    sy = float(scale) * float(stretch_y)
+    linear = np.array([[cos_t * sx, -sin_t * sy], [sin_t * sx, cos_t * sy]], dtype=np.float64)
+    offset = dst_xy - linear @ src_xy
+    matrix = np.eye(3, dtype=np.float64)
+    matrix[:2, :2] = linear
+    matrix[0, 2] = offset[0]
+    matrix[1, 2] = offset[1]
+    return matrix
 
 
 def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any] | None = None) -> None:
@@ -801,6 +814,8 @@ def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any
     correction = _manual_matrix(
         output_shape,
         float(manual.get("scale", 1.0)),
+        float(manual.get("stretch_x", 1.0)),
+        float(manual.get("stretch_y", 1.0)),
         float(manual.get("rotation_deg", 0.0)),
         float(manual.get("translation_y", 0.0)),
         float(manual.get("translation_x", 0.0)),
@@ -1125,6 +1140,8 @@ HTML = r"""
     <button onclick="autoRegister()">Run Auto Registration</button>
     <div id="busy-autoreg" class="busy"><progress></progress> Running auto-registration and applying native-resolution transform...</div>
     <div class="slider-row"><label>Scale</label><input id="mScale" type="range" min="0.70" max="1.30" value="1" step="0.002" oninput="manualAdjust()"><span id="mScaleV">1</span></div>
+    <div class="slider-row"><label>X stretch</label><input id="mStretchX" type="range" min="0.70" max="1.30" value="1" step="0.002" oninput="manualAdjust()"><span id="mStretchXV">1</span></div>
+    <div class="slider-row"><label>Y stretch</label><input id="mStretchY" type="range" min="0.70" max="1.30" value="1" step="0.002" oninput="manualAdjust()"><span id="mStretchYV">1</span></div>
     <div class="slider-row"><label>Rotation</label><input id="mRot" type="range" min="-30" max="30" value="0" step="0.1" oninput="manualAdjust()"><span id="mRotV">0</span></div>
     <div class="slider-row"><label>Translate Y</label><input id="mTy" type="range" min="-400" max="400" value="0" step="1" oninput="manualAdjust()"><span id="mTyV">0</span></div>
     <div class="slider-row"><label>Translate X</label><input id="mTx" type="range" min="-400" max="400" value="0" step="1" oninput="manualAdjust()"><span id="mTxV">0</span></div>
@@ -1152,7 +1169,7 @@ function img(name){ return `/api/file?session=${sessionId}&name=${name}&t=${Date
 function setBusy(id, on){ const el=document.getElementById(id); if(el) el.classList.toggle('active', on); document.querySelectorAll('button').forEach(b=>b.disabled=on); }
 async function withBusy(id, label, fn){ setBusy(id,true); setStatus(label); try { const out=await fn(); return out; } catch(e) { setStatus('Error: '+e.message); throw e; } finally { setBusy(id,false); } }
 function showProcessedImages(files){ if(files.includes('oct_raw_display_preview.png')) octRaw.src=img('oct_raw_display_preview.png'); if(files.includes('oct_flatfield_corrected_preview.png')) octFlat.src=img('oct_flatfield_corrected_preview.png'); if(files.includes('oct_tile_artifact_suppressed_preview.png')) octTile.src=img('oct_tile_artifact_suppressed_preview.png'); if(files.includes('oct_registered_preview.png')) octPre.src=img('oct_registered_preview.png'); if(files.includes('he_standardized_native_preview.png')) hePre.src=img('he_standardized_native_preview.png'); if(files.includes('he_black_white_input_preview.png')) heBW.src=img('he_black_white_input_preview.png'); if(files.includes('oct_mask_overlay.png')) octMaskOverlay.src=img('oct_mask_overlay.png'); if(files.includes('he_mask_overlay.png')) heMaskOverlay.src=img('he_mask_overlay.png'); if(files.includes('overlay_preview.png')) overlay.src=img('overlay_preview.png'); if(files.includes('registered_mask_preview.png')) maskReg.src=img('registered_mask_preview.png'); }
-function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; mScale.value=manual.scale ?? 1; mRot.value=manual.rotation_deg ?? 0; mTy.value=manual.translation_y ?? 0; mTx.value=manual.translation_x ?? 0; mScaleV.textContent=mScale.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; }
+function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; mScale.value=manual.scale ?? 1; mStretchX.value=manual.stretch_x ?? 1; mStretchY.value=manual.stretch_y ?? 1; mRot.value=manual.rotation_deg ?? 0; mTy.value=manual.translation_y ?? 0; mTx.value=manual.translation_x ?? 0; mScaleV.textContent=mScale.value; mStretchXV.textContent=mStretchX.value; mStretchYV.textContent=mStretchY.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; }
 function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
 async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
 async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_search_feature.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_search_bw.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); if(files.includes('he_registered_masked_preview.png')&&files.includes('oct_registered_masked_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
@@ -1175,10 +1192,10 @@ function undoEdit(id){ const ed=editors[id]; if(!ed||!ed.history.length){ setSta
 function canvasData(id){ const ed=editors[id]; return ed ? ed.maskCanvas.toDataURL('image/png') : document.getElementById(id).toDataURL('image/png'); }
 async function saveMasks(){ const j=await api('/api/save_masks',{session_id:sessionId,oct_mask:canvasData('octCanvas'),he_mask:canvasData('heCanvas')}); setStatus(JSON.stringify(j,null,2)); }
 async function autoRegister(){ await withBusy('busy-autoreg','Running auto registration...', async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
-function manualAdjust(){ mScaleV.textContent=mScale.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; drawLiveOverlay(); clearTimeout(debounce); debounce=setTimeout(async()=>{ setStatus('Applying manual adjustment to native outputs...'); await api('/api/manual',{session_id:sessionId,scale:parseFloat(mScale.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value)}); await refreshReg(); setStatus('Manual adjustment applied.'); },650); }
+function manualAdjust(){ mScaleV.textContent=mScale.value; mStretchXV.textContent=mStretchX.value; mStretchYV.textContent=mStretchY.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; drawLiveOverlay(); clearTimeout(debounce); debounce=setTimeout(async()=>{ setStatus('Applying manual adjustment to native outputs...'); await api('/api/manual',{session_id:sessionId,scale:parseFloat(mScale.value),stretch_x:parseFloat(mStretchX.value),stretch_y:parseFloat(mStretchY.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value)}); await refreshReg(); setStatus('Manual adjustment applied.'); },650); }
 async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.he=await imageLoad(img('he_registered_masked_preview.png')); liveImages.oct=await imageLoad(img('oct_registered_masked_preview.png')); liveImages.mask=await imageLoad(img('registered_mask_preview.png')); initLiveCanvas(); drawLiveOverlay(); }
 function initLiveCanvas(){ if(!liveImages.oct)return; liveOverlay.width=liveImages.oct.width; liveOverlay.height=liveImages.oct.height; }
-function drawLiveOverlay(){ heOpacityV.textContent=heOpacity.value; if(!liveImages.he||!liveImages.oct)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.oct.width){initLiveCanvas();} ctx.clearRect(0,0,c.width,c.height); ctx.globalAlpha=1; ctx.drawImage(liveImages.oct,0,0,c.width,c.height); ctx.save(); ctx.translate(c.width/2+parseFloat(mTx.value), c.height/2+parseFloat(mTy.value)); ctx.rotate(parseFloat(mRot.value)*Math.PI/180); const s=parseFloat(mScale.value); ctx.scale(s,s); ctx.globalAlpha=parseFloat(heOpacity.value); ctx.drawImage(liveImages.he,-c.width/2,-c.height/2,c.width,c.height); ctx.restore(); ctx.globalAlpha=1; }
+function drawLiveOverlay(){ heOpacityV.textContent=heOpacity.value; if(!liveImages.he||!liveImages.oct)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.oct.width){initLiveCanvas();} ctx.clearRect(0,0,c.width,c.height); ctx.globalAlpha=1; ctx.drawImage(liveImages.oct,0,0,c.width,c.height); ctx.save(); ctx.translate(c.width/2+parseFloat(mTx.value), c.height/2+parseFloat(mTy.value)); ctx.rotate(parseFloat(mRot.value)*Math.PI/180); const s=parseFloat(mScale.value); ctx.scale(s*parseFloat(mStretchX.value),s*parseFloat(mStretchY.value)); ctx.globalAlpha=parseFloat(heOpacity.value); ctx.drawImage(liveImages.he,-c.width/2,-c.height/2,c.width,c.height); ctx.restore(); ctx.globalAlpha=1; }
 async function saveFinal(){ await withBusy('busy-save','Saving final outputs...', async()=>{ const j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(JSON.stringify(j,null,2)); }); }
 </script>
 </body>
@@ -1369,6 +1386,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 state = json.loads((paths.root / "transform_state.json").read_text())
                 state["manual"] = {
                     "scale": float(payload.get("scale", 1.0)),
+                    "stretch_x": float(payload.get("stretch_x", 1.0)),
+                    "stretch_y": float(payload.get("stretch_y", 1.0)),
                     "rotation_deg": float(payload.get("rotation_deg", 0.0)),
                     "translation_y": float(payload.get("translation_y", 0.0)),
                     "translation_x": float(payload.get("translation_x", 0.0)),
