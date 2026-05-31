@@ -721,11 +721,13 @@ def register_pair(
     _save_rgb(pair.output_dir / "overlay_false_color.png", _false_color(warped_he, oct_pre_native["contrast"], oct_mask_native))
     _save_rgb(pair.output_dir / "overlay_contours.png", _contours(warped_he, warped_mask, oct_mask_native))
     _save_rgb(pair.output_dir / "overlay_checkerboard.png", _checkerboard(warped_he, _gray_to_rgb(oct_pre_native["contrast"]), tile=48))
+    input_cache = _cache_input_images(pair.output_dir, pair.oct_path, pair.he_path)
 
     summary = {
         "case_id": pair.case_id,
         "oct_path": str(pair.oct_path),
         "he_path": str(pair.he_path),
+        **input_cache,
         "pipeline": "align_he_to_oct_2D_v5",
         "preprocessing": {
             "oct": "robust percentile rescale + gaussian flat-field division + row/column median bias suppression + CLAHE + gamma",
@@ -806,6 +808,23 @@ def _sync_clean_outputs(output_dir: Path) -> None:
         src = output_dir / name
         if src.exists():
             shutil.copy2(src, clean_dir / name)
+
+
+def _cache_input_images(output_dir: Path, oct_path: Path, he_path: Path) -> dict[str, str]:
+    input_dir = output_dir / "inputs"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    cached: dict[str, str] = {}
+    for key, src in (("oct", oct_path), ("he", he_path)):
+        dst = input_dir / f"{key}{src.suffix or '.tiff'}"
+        if not dst.exists() and src.exists():
+            shutil.copy2(src, dst)
+        if dst.exists():
+            cached[f"{key}_relative_path"] = str(dst.relative_to(output_dir))
+            cached[f"{key}_original_name"] = src.name
+    if cached:
+        cached.update({"oct_original_path": str(oct_path), "he_original_path": str(he_path)})
+        (input_dir / "inputs.json").write_text(json.dumps(cached, indent=2))
+    return cached
 
 
 def _gray_to_rgb(gray: np.ndarray) -> np.ndarray:

@@ -117,7 +117,35 @@ def _session(session_id: str) -> SessionPaths:
 
 def _write_session(root: Path, oct_path: Path, he_path: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "session.json").write_text(json.dumps({"root": str(root), "oct_path": str(oct_path), "he_path": str(he_path)}, indent=2))
+    cached = _cache_input_images(root, oct_path, he_path)
+    payload = {"root": str(root), "oct_path": str(oct_path), "he_path": str(he_path)}
+    payload.update(cached)
+    (root / "session.json").write_text(json.dumps(payload, indent=2))
+
+
+def _input_cache_dir(root: Path) -> Path:
+    return root / "inputs"
+
+
+def _cache_input_images(root: Path, oct_path: Path, he_path: Path) -> dict[str, str]:
+    cache_dir = _input_cache_dir(root)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached: dict[str, str] = {}
+    for key, src in (("oct", oct_path), ("he", he_path)):
+        src = Path(src)
+        dst = cache_dir / f"{key}{src.suffix or '.tiff'}"
+        if not dst.exists() and src.exists():
+            shutil.copy2(src, dst)
+        if dst.exists():
+            cached[f"{key}_relative_path"] = str(dst.relative_to(root))
+            cached[f"{key}_original_name"] = src.name
+    if cached:
+        manifest = cache_dir / "inputs.json"
+        current = json.loads(manifest.read_text()) if manifest.exists() else {}
+        current.update(cached)
+        current.update({"oct_original_path": str(oct_path), "he_original_path": str(he_path)})
+        manifest.write_text(json.dumps(current, indent=2))
+    return cached
 
 
 def _write_session_alias(alias_root: Path, output_root: Path, oct_path: Path, he_path: Path) -> None:
@@ -127,17 +155,68 @@ def _write_session_alias(alias_root: Path, output_root: Path, oct_path: Path, he
     )
 
 
+def _existing_path_from_json(value: Any, sample_dir: Path) -> Path | None:
+    if not value:
+        return None
+    path = Path(str(value)).expanduser()
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.append(sample_dir / path)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists():
+            return resolved
+    return None
+
+
+def _local_input_candidate(sample_dir: Path, kind: str, original_name: str | None = None) -> Path | None:
+    cache_dir = _input_cache_dir(sample_dir)
+    candidates: list[Path] = []
+    if original_name:
+        candidates.extend([cache_dir / original_name, sample_dir / original_name])
+    for parent in [cache_dir, sample_dir]:
+        if parent.exists():
+            candidates.extend(sorted(parent.glob(f"{kind}.*")))
+            candidates.extend(sorted(parent.glob(f"*{kind}*.tif*")))
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def _paths_from_processed_output(sample_dir: Path) -> tuple[Path, Path]:
+    records: list[dict[str, Any]] = []
+    input_manifest = _input_cache_dir(sample_dir) / "inputs.json"
+    if input_manifest.exists():
+        try:
+            records.append(json.loads(input_manifest.read_text()))
+        except Exception:
+            pass
     session_manifest = sample_dir / "session.json"
     if session_manifest.exists():
-        data = json.loads(session_manifest.read_text())
-        return Path(data["oct_path"]), Path(data["he_path"])
+        try:
+            records.append(json.loads(session_manifest.read_text()))
+        except Exception:
+            pass
     summary_path = sample_dir / "alignment_summary.json"
     if summary_path.exists():
-        data = json.loads(summary_path.read_text())
-        if "oct_path" in data and "he_path" in data:
-            return Path(data["oct_path"]), Path(data["he_path"])
-    raise FileNotFoundError("Processed sample is missing session.json or alignment_summary.json with OCT/HE paths")
+        try:
+            records.append(json.loads(summary_path.read_text()))
+        except Exception:
+            pass
+    oct_path = he_path = None
+    for data in records:
+        oct_path = oct_path or _existing_path_from_json(data.get("oct_relative_path") or data.get("oct_path") or data.get("oct_original_path"), sample_dir)
+        he_path = he_path or _existing_path_from_json(data.get("he_relative_path") or data.get("he_path") or data.get("he_original_path"), sample_dir)
+    for data in records:
+        oct_path = oct_path or _local_input_candidate(sample_dir, "oct", data.get("oct_original_name"))
+        he_path = he_path or _local_input_candidate(sample_dir, "he", data.get("he_original_name"))
+    if oct_path and he_path:
+        return oct_path, he_path
+    raise FileNotFoundError("Processed sample is missing reachable OCT/HE inputs. Keep inputs/ with the output folder, or keep the original files at their saved paths.")
 
 
 def _scan_processed_outputs(output_root: Path) -> list[dict[str, str]]:
@@ -261,8 +340,11 @@ def _rebuild_transform_state_from_summary(paths: SessionPaths, summary: dict[str
 def _ensure_interactive_artifacts(paths: SessionPaths) -> list[str]:
     """Backfill files needed to reopen batch/script outputs as editable sessions."""
     paths.root.mkdir(parents=True, exist_ok=True)
+    cached = _cache_input_images(paths.root, paths.oct_path, paths.he_path)
     summary = _load_alignment_summary(paths.root)
     created: list[str] = []
+    if cached:
+        created.append("relocatable input copies")
     required_previews = [
         "oct_raw_display_preview.png",
         "oct_flatfield_corrected_preview.png",
@@ -1417,6 +1499,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "output_dir": str(paths.root),
                     "files": {f: str(paths.root / f) for f in files if (paths.root / f).exists()},
                 }
+                summary.update(_cache_input_images(paths.root, paths.oct_path, paths.he_path))
                 (paths.root / "alignment_summary.json").write_text(json.dumps(summary, indent=2))
                 _json_response(self, {"ok": True, "output_dir": str(paths.root), "files": [f for f in files if (paths.root / f).exists()]})
             else:
