@@ -203,6 +203,117 @@ def _processed_state(root: Path) -> dict[str, Any]:
     return state
 
 
+def _load_alignment_summary(root: Path) -> dict[str, Any]:
+    summary_path = root / "alignment_summary.json"
+    if not summary_path.exists():
+        return {}
+    try:
+        return json.loads(summary_path.read_text())
+    except Exception:
+        return {}
+
+
+def _rebuild_transform_state_from_summary(paths: SessionPaths, summary: dict[str, Any]) -> dict[str, Any] | None:
+    best = summary.get("he_transform_into_oct_xy") or {}
+    if not best or not (paths.root / "mask_state.json").exists():
+        return None
+    search_shape = tuple(json.loads((paths.root / "mask_state.json").read_text())["search_shape"])
+    oct_mask = _load_mask_png(paths.root / "oct_mask_edit.png")
+    he_mask = _load_mask_png(paths.root / "he_mask_edit.png")
+    if oct_mask.shape != search_shape:
+        oct_mask = _resize_mask(oct_mask, search_shape)
+    if he_mask.shape != search_shape:
+        he_mask = _resize_mask(he_mask, search_shape)
+    oct_center = _mask_center(oct_mask)
+    he_center = _mask_center(he_mask)
+    search_matrix = _affine(
+        float(best.get("scale", 1.0)),
+        float(best.get("rotation_deg", 0.0)),
+        float(best.get("translation_y", 0.0)),
+        float(best.get("translation_x", 0.0)),
+        he_center,
+        oct_center,
+    )
+    he_shape = _ensure_rgb(_read_tiff(paths.he_path)).shape[:2]
+    if (paths.root / "oct_registered.tiff").exists():
+        oct_shape = tifffile.imread(str(paths.root / "oct_registered.tiff")).shape[:2]
+    else:
+        oct_shape = _oct_to_gray(_read_tiff(paths.oct_path)).shape[:2]
+    native = _native_matrix(search_matrix, he_shape, oct_shape, search_shape)
+    transform_state = {
+        "auto_params": {
+            "scale": float(best.get("scale", 1.0)),
+            "rotation_deg": float(best.get("rotation_deg", 0.0)),
+            "tilt_x_deg": 0.0,
+            "tilt_y_deg": 0.0,
+            "translation_y": float(best.get("translation_y", 0.0)),
+            "translation_x": float(best.get("translation_x", 0.0)),
+            "score": float(best.get("score", 0.0)),
+            "details": best.get("details", {}),
+        },
+        "native_matrix": native.tolist(),
+        "manual": {"scale": 1.0, "rotation_deg": 0.0, "translation_y": 0.0, "translation_x": 0.0},
+    }
+    (paths.root / "transform_state.json").write_text(json.dumps(transform_state, indent=2))
+    return transform_state
+
+
+def _ensure_interactive_artifacts(paths: SessionPaths) -> list[str]:
+    """Backfill files needed to reopen batch/script outputs as editable sessions."""
+    paths.root.mkdir(parents=True, exist_ok=True)
+    summary = _load_alignment_summary(paths.root)
+    created: list[str] = []
+    required_previews = [
+        "oct_raw_display_preview.png",
+        "oct_flatfield_corrected_preview.png",
+        "oct_tile_artifact_suppressed_preview.png",
+        "oct_registered_preview.png",
+        "he_standardized_native.tiff",
+        "he_standardized_native_preview.png",
+        "he_black_white_input_preview.png",
+    ]
+    if any(not (paths.root / name).exists() for name in required_previews):
+        normalizer = str(summary.get("stain_normalizer") or "torchstain_reinhard")
+        _prepare_state(paths, normalizer)
+        created.append("preprocessing previews")
+    required_masks = [
+        "mask_state.json",
+        "oct_mask_edit.png",
+        "he_mask_edit.png",
+        "oct_search_feature.png",
+        "he_search_bw.png",
+        "oct_mask_overlay.png",
+        "he_mask_overlay.png",
+    ]
+    if any(not (paths.root / name).exists() for name in required_masks):
+        _compute_masks(
+            paths,
+            str(summary.get("he_mask_mode") or "auto"),
+            float(summary.get("he_gray_mask_percentile", 67.0)),
+            float(summary.get("he_alpha_threshold", 0.376)),
+            float(summary.get("oct_alpha_threshold", 0.376)),
+        )
+        created.append("editable masks")
+    if not (paths.root / "transform_state.json").exists():
+        rebuilt = _rebuild_transform_state_from_summary(paths, summary)
+        if rebuilt is None:
+            _estimate_registration(paths)
+            created.append("registration transform")
+        else:
+            created.append("registration transform")
+    required_registration_previews = [
+        "overlay_preview.png",
+        "registered_mask_preview.png",
+        "he_registered_masked_preview.png",
+        "oct_registered_masked_preview.png",
+    ]
+    if any(not (paths.root / name).exists() for name in required_registration_previews):
+        _apply_current_transform(paths)
+        created.append("registration previews")
+    _sync_clean_outputs(paths)
+    return created
+
+
 def _clean_stem(path: Path, suffixes: tuple[str, ...]) -> str:
     name = path.name
     for suffix in path.suffixes:
@@ -337,6 +448,14 @@ def _run_batch_case(case: dict[str, Any], overwrite: bool = True) -> dict[str, A
         log.write(" ".join(cmd) + "\n\n")
         log.flush()
         proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
+        if proc.returncode == 0:
+            try:
+                rebuilt = _ensure_interactive_artifacts(SessionPaths(output_dir, Path(case["oct_path"]), Path(case["he_path"])))
+                if rebuilt:
+                    log.write("\nInteractive reload artifacts saved: " + ", ".join(rebuilt) + "\n")
+            except Exception as exc:
+                proc = subprocess.CompletedProcess(cmd, 1)
+                log.write(f"\nFailed to save interactive reload artifacts: {exc}\n")
     result = {
         "case_id": case["case_id"],
         "session_id": case["session_id"],
@@ -1036,7 +1155,7 @@ function showProcessedImages(files){ if(files.includes('oct_raw_display_preview.
 function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; mScale.value=manual.scale ?? 1; mRot.value=manual.rotation_deg ?? 0; mTy.value=manual.translation_y ?? 0; mTx.value=manual.translation_x ?? 0; mScaleV.textContent=mScale.value; mRotV.textContent=mRot.value; mTyV.textContent=mTy.value; mTxV.textContent=mTx.value; }
 function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
 async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
-async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_search_feature.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_search_bw.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); if(files.includes('he_registered_masked_preview.png')&&files.includes('oct_registered_masked_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}`); }); }
+async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_search_feature.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_search_bw.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); if(files.includes('he_registered_masked_preview.png')&&files.includes('oct_registered_masked_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,mask:null}; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
 function batchImg(record){ return `/api/batch_file?batch=${encodeURIComponent(batchId||'')}&case=${encodeURIComponent(record.case_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function updateBatchProgress(job){ const total=Number(job?.total||0); const completed=Number(job?.completed||0); const progress=document.getElementById('batchProgress'); const text=document.getElementById('batchProgressText'); if(progress){ progress.max=Math.max(total,1); progress.value=Math.min(completed,total); } if(text){ const remaining=Math.max(total-completed,0); text.textContent=`Detected ${total} sample${total===1?'':'s'}. Completed ${completed}. Remaining ${remaining}.`; } }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ updateBatchProgress(null); status.textContent='No batch run started.'; if(results)results.innerHTML=''; return; } updateBatchProgress(job); status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); if(!cards.length){ results.innerHTML='<div class="small">Waiting for the first completed sample preview...</div>'; return; } results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img loading="lazy" decoding="async" src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
@@ -1114,6 +1233,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not sample_dir.exists() or not sample_dir.is_dir():
                     raise FileNotFoundError("Processed sample folder does not exist")
                 oct_path, he_path = _paths_from_processed_output(sample_dir)
+                rebuilt = _ensure_interactive_artifacts(SessionPaths(sample_dir, oct_path, he_path))
                 session_id, alias_root = _unique_session_root(f"loaded_{_slug(sample_dir.name)}")
                 _write_session_alias(alias_root, sample_dir, oct_path, he_path)
                 files = _known_output_files(sample_dir)
@@ -1126,6 +1246,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         "files": files,
                         "state": _processed_state(sample_dir),
                         "can_manual_adjust": (sample_dir / "transform_state.json").exists(),
+                        "rebuilt": rebuilt,
                     },
                 )
             elif parsed.path == "/api/batch_start":
