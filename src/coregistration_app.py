@@ -251,7 +251,24 @@ def _unique_child_root(parent: Path, session_id: str) -> tuple[str, Path]:
     raise RuntimeError(f"Could not create a unique output folder for {candidate}")
 
 
-def _find_batch_pairs(input_root: Path, batch_root: Path) -> list[dict[str, Any]]:
+def _specified_output_root(value: str | None, default_parent: Path = APP_ROOT) -> Path:
+    if value is None or not str(value).strip():
+        return default_parent
+    return Path(str(value)).expanduser().resolve()
+
+
+def _session_root_for_output(parent: Path, session_id: str, overwrite: bool = False) -> tuple[str, Path]:
+    parent.mkdir(parents=True, exist_ok=True)
+    candidate = _slug(session_id)
+    root = parent / candidate
+    if overwrite:
+        if root.exists():
+            shutil.rmtree(root)
+        return candidate, root
+    return _unique_child_root(parent, candidate)
+
+
+def _find_batch_pairs(input_root: Path, batch_root: Path, overwrite: bool = False) -> list[dict[str, Any]]:
     tif_paths = sorted(
         p for p in input_root.rglob("*.tif*")
         if p.is_file() and not p.name.startswith("._") and "coregistration_outputs" not in p.parts
@@ -271,7 +288,7 @@ def _find_batch_pairs(input_root: Path, batch_root: Path) -> list[dict[str, Any]
                 continue
             seen.add(key)
             case_id = _session_id_from_paths(oct_path, he_path)
-            sample_id, output_dir = _unique_child_root(batch_root, case_id)
+            sample_id, output_dir = _session_root_for_output(batch_root, case_id, overwrite=overwrite)
             cases.append({
                 "case_id": sample_id,
                 "oct_path": oct_path,
@@ -867,6 +884,8 @@ HTML = r"""
       <div><label>Input folder</label><input id="batchInput" type="text" placeholder="/path/to/folder/with/multiple/samples"></div>
       <div><label>Samples to process in parallel</label><input id="batchWorkers" type="number" value="4" min="1" max="16" step="1"></div>
     </div>
+    <label>Batch output folder</label><input id="batchOutput" type="text" placeholder="Leave blank for OCT_HE_align_interact_v5/coregistration_outputs/interactive_app">
+    <div class="small"><label><input id="batchOverwrite" type="checkbox"> overwrite already processed samples in the selected output folder</label></div>
     <button onclick="startBatch()">Run Batch Registration</button>
     <button class="secondary" onclick="applyBatchKeepChoices()">Delete Unchecked Outputs</button>
     <div id="busy-batch" class="busy"><progress></progress> Batch registration is running...</div>
@@ -891,6 +910,7 @@ HTML = r"""
       <div><label>OCT path</label><input id="octPath" type="text" placeholder="/path/to/sample_oct.tiff"></div>
       <div><label>HE path</label><input id="hePath" type="text" placeholder="/path/to/sample_section.tiff"></div>
     </div>
+    <label>Output folder</label><input id="singleOutput" type="text" placeholder="Leave blank for OCT_HE_align_interact_v5/coregistration_outputs/interactive_app">
     <button onclick="loadPaths()">Load From Paths</button>
     <div class="grid">
       <div><label>Upload OCT</label><input id="octFile" type="file" accept=".tif,.tiff,image/tiff"></div>
@@ -979,9 +999,9 @@ async function loadProcessedSample(){ await withBusy('busy-processed','Loading p
 function batchImg(record){ return `/api/file?session=${encodeURIComponent(record.session_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ status.textContent='No batch run started.'; return; } status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
 async function pollBatch(){ if(!batchId)return; const job=await api('/api/batch_status',{batch_id:batchId}); renderBatch(job); const running=job.status==='queued'||job.status==='running'; setBusy('busy-batch', running); if(running){ batchTimer=setTimeout(pollBatch,2500); } else { setStatus(`Batch ${batchId} complete. Review overlays and uncheck any outputs to delete.`); } }
-async function startBatch(){ await withBusy('busy-batch','Starting batch registration...', async()=>{ const j=await api('/api/batch_start',{input_root:batchInput.value,workers:parseInt(batchWorkers.value||'1',10)}); batchId=j.batch_id; renderBatch(j); clearTimeout(batchTimer); batchTimer=setTimeout(pollBatch,1000); setStatus(`Started batch ${batchId} with ${j.total} sample(s).`); }); }
+async function startBatch(){ await withBusy('busy-batch','Starting batch registration...', async()=>{ const j=await api('/api/batch_start',{input_root:batchInput.value,output_root:batchOutput.value,workers:parseInt(batchWorkers.value||'1',10),overwrite:batchOverwrite.checked}); batchId=j.batch_id; renderBatch(j); clearTimeout(batchTimer); batchTimer=setTimeout(pollBatch,1000); setStatus(`Started batch ${batchId} with ${j.total} sample(s).`); }); }
 async function applyBatchKeepChoices(){ if(!batchId){ setStatus('No batch run to finalize.'); return; } const keep={}; document.querySelectorAll('#batchResults input[data-case]').forEach(cb=>{ keep[cb.dataset.case]=cb.checked; }); const j=await api('/api/batch_apply_keep',{batch_id:batchId,keep}); renderBatch(j); setStatus(`Deleted ${j.deleted_count||0} unchecked output folder(s).`); }
-async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value}); sessionId=j.session_id; setStatus('Loaded session '+sessionId); }); }
+async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value,output_root:singleOutput.value}); sessionId=j.session_id; setStatus(`Loaded session ${sessionId}\nOutput: ${j.output_dir}`); }); }
 async function uploadFiles(){ await withBusy('busy-load','Uploading files...', async()=>{ const fd=new FormData(); fd.append('oct', octFile.files[0]); fd.append('he', heFile.files[0]); const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); sessionId=j.session_id; setStatus('Uploaded session '+sessionId); }); }
 async function preprocess(){ await withBusy('busy-preprocess','Preprocessing OCT and HE...', async()=>{ const j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); setStatus(JSON.stringify(j,null,2)); }); }
 async function runAllProcessing(){ await withBusy('busy-preprocess','Running full pipeline...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); let j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); octMaskOverlay.src=img('oct_mask_overlay.png'); heMaskOverlay.src=img('he_mask_overlay.png'); await loadCanvas('octCanvas','oct_mask_edit.png','oct_search_feature.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_search_bw.png',[255,35,20]); await saveMasks(); j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(`Full processing complete.\nOutput: ${j.output_dir}`); }); }
@@ -1067,13 +1087,19 @@ class AppHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/batch_start":
                 payload = _read_json(self)
                 input_root = Path(payload["input_root"]).expanduser().resolve()
+                overwrite = bool(payload.get("overwrite", False))
                 workers = max(1, min(16, int(payload.get("workers", 4))))
                 if not input_root.exists() or not input_root.is_dir():
                     raise FileNotFoundError("Batch input folder does not exist")
-                batch_base = f"batch_{_slug(input_root.name)}_{time.strftime('%Y%m%d_%H%M%S')}"
-                batch_id, batch_root = _unique_session_root(batch_base)
+                requested_output_root = str(payload.get("output_root", "")).strip()
+                if requested_output_root:
+                    batch_root = Path(requested_output_root).expanduser().resolve()
+                    batch_id = _slug(batch_root.name)
+                else:
+                    batch_base = f"batch_{_slug(input_root.name)}_{time.strftime('%Y%m%d_%H%M%S')}"
+                    batch_id, batch_root = _unique_session_root(batch_base)
                 batch_root.mkdir(parents=True, exist_ok=True)
-                cases = _find_batch_pairs(input_root, batch_root)
+                cases = _find_batch_pairs(input_root, batch_root, overwrite=overwrite)
                 if not cases:
                     raise ValueError("No OCT/HE sample pairs were found in the input folder")
                 job = {
@@ -1082,6 +1108,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "input_root": str(input_root),
                     "output_root": str(batch_root),
                     "workers": workers,
+                    "overwrite": overwrite,
                     "total": len(cases),
                     "completed": 0,
                     "results": [],
@@ -1123,7 +1150,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 he_item = form["he"]
                 oct_filename = Path(oct_item.filename or "oct.tiff").name
                 he_filename = Path(he_item.filename or "he.tiff").name
-                session_id, root = _unique_session_root(_session_id_from_paths(Path(oct_filename), Path(he_filename)))
+                output_parent = _specified_output_root(None)
+                session_id, root = _session_root_for_output(output_parent, _session_id_from_paths(Path(oct_filename), Path(he_filename)))
                 upload_dir = root / "uploads"
                 upload_dir.mkdir(parents=True, exist_ok=True)
                 oct_path = upload_dir / oct_filename
@@ -1138,7 +1166,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 he_path = Path(payload["he_path"]).expanduser().resolve()
                 if not oct_path.exists() or not he_path.exists():
                     raise FileNotFoundError("OCT or HE path does not exist")
-                session_id, root = _unique_session_root(_session_id_from_paths(oct_path, he_path))
+                output_parent = _specified_output_root(payload.get("output_root"))
+                session_id, root = _session_root_for_output(output_parent, _session_id_from_paths(oct_path, he_path))
                 _write_session(root, oct_path, he_path)
                 _json_response(self, {"session_id": session_id, "output_dir": str(root)})
             elif parsed.path == "/api/preprocess":

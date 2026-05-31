@@ -131,7 +131,7 @@ If macOS blocks the file because it was downloaded from the internet, right-clic
 
 ## How To Use The App
 
-1. Load images: choose an OCT image and an HE image by file path or upload.
+1. Load images: choose an OCT image and an HE image by file path or upload. You can optionally specify an output folder for that sample.
 2. Preprocess: run modality-specific preprocessing for OCT and HE, or click `Run All Processing And Save` to run all remaining steps automatically.
 3. Remove background: generate OCT and HE tissue masks.
 4. Edit masks: add or erase tissue regions directly on the overlays if needed.
@@ -155,13 +155,17 @@ The app will automatically fill all available previews, masks, registration over
 The app also has a `Batch Process` section for running many samples without manual interaction.
 
 1. Enter the input folder that contains multiple OCT/HE samples.
-2. Enter how many samples should run in parallel.
-3. Click `Run Batch Registration`.
-4. Wait until the batch status says complete.
-5. Review the overlay preview shown for each sample.
-6. Leave `keep` checked for samples you want to keep.
-7. Uncheck `keep` for samples you want to discard.
-8. Click `Delete Unchecked Outputs`.
+2. Optionally enter a batch output folder. If left blank, outputs go inside this app's `coregistration_outputs/interactive_app` folder.
+3. Enter how many samples should run in parallel.
+4. If you want to rerun samples that already have output folders, check `overwrite already processed samples`.
+5. Click `Run Batch Registration`.
+6. Wait until the batch status says complete.
+7. Review the overlay preview shown for each sample.
+8. Leave `keep` checked for samples you want to keep.
+9. Uncheck `keep` for samples you want to discard.
+10. Click `Delete Unchecked Outputs`.
+
+When overwrite is enabled, the app scans the selected output folder using the sample IDs and replaces matching sample output folders instead of creating `_02`, `_03`, and so on.
 
 By default, every sample is marked as `keep`, so nothing is deleted unless you uncheck it.
 
