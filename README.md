@@ -1,6 +1,6 @@
 # OCT_HE_align_interact_v5
 
-Interactive OCT/HE image alignment app, version 5.
+Interactive OCT/HE image alignment app, version 5.2.
 
 Author: Ates Fettahoglu
 
@@ -193,4 +193,4 @@ Then open:
 http://127.0.0.1:8770/
 ```
 
-If installation fails, confirm that you are using the conda environment with Python 3.12. Version 5 includes a recovered v3 registration reference that expects Python 3.12.
+If installation fails, confirm that you are using the conda environment with Python 3.12. Version 5.2 includes a recovered v3 registration reference that expects Python 3.12.

@@ -1249,7 +1249,7 @@ HTML = r"""
   </style>
 </head>
 <body>
-<header><div class="small">Interactive registration workspace</div><h1>OCT/HE Coregistration Studio</h1><div class="small">Preprocess | Mask and edit | Auto-register | Manually adjust | Save native-resolution outputs</div><div class="app-meta">Version 5 | Ates Fettahoglu</div></header>
+<header><div class="small">Interactive registration workspace</div><h1>OCT/HE Coregistration Studio</h1><div class="small">Preprocess | Mask and edit | Auto-register | Manually adjust | Save native-resolution outputs</div><div class="app-meta">Version 5.2 | Ates Fettahoglu</div></header>
 <main>
   <section>
     <h2>Batch Process</h2>
