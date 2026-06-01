@@ -730,18 +730,21 @@ def _clear_he_dependent_outputs(root: Path) -> None:
             path.unlink()
 
 
-def _flip_he_for_session(session_id: str, paths: SessionPaths, stain_normalizer: str) -> dict[str, Any]:
+def _flip_he_for_session(session_id: str, paths: SessionPaths, stain_normalizer: str, axis: str) -> dict[str, Any]:
+    axis = axis.lower().strip()
+    if axis not in {"x", "y"}:
+        raise ValueError("HE flip axis must be 'x' or 'y'")
     he_raw = tifffile.imread(str(paths.he_path))
-    flipped = np.flip(he_raw, axis=1)
+    flipped = np.flip(he_raw, axis=0 if axis == "x" else 1)
     input_dir = _input_cache_dir(paths.root)
     input_dir.mkdir(parents=True, exist_ok=True)
-    flipped_path = input_dir / "he_flipped_y_axis.tiff"
+    flipped_path = input_dir / f"he_flipped_{axis}_axis.tiff"
     tifffile.imwrite(str(flipped_path), flipped)
     _update_session_he_path(session_id, paths.root, paths.oct_path, flipped_path)
     flipped_paths = SessionPaths(paths.root, paths.oct_path, flipped_path)
     _clear_he_dependent_outputs(paths.root)
     state = _prepare_state(flipped_paths, stain_normalizer)
-    return {"ok": True, "he_path": str(flipped_path), "state": state, "output_dir": str(paths.root)}
+    return {"ok": True, "axis": axis, "he_path": str(flipped_path), "state": state, "output_dir": str(paths.root)}
 
 
 def _mask_maps_from_feature(mask: np.ndarray, feature: np.ndarray) -> dict[str, np.ndarray]:
@@ -1333,7 +1336,8 @@ HTML = r"""
     <label>HE stain/color standardization</label>
     <select id="stain"><option value="torchstain_reinhard">torchstain Reinhard</option><option value="torchstain_macenko">torchstain Macenko</option><option value="none">None</option></select>
     <button onclick="preprocess()">Preprocess Images</button>
-    <button class="secondary" onclick="flipHe()">Flip HE Left-Right</button>
+    <button class="secondary" onclick="flipHe('y')">Flip HE Left-Right</button>
+    <button class="secondary" onclick="flipHe('x')">Flip HE Up-Down</button>
     <button onclick="runAllProcessing()">Run All Processing And Save</button>
     <div id="busy-preprocess" class="busy"><progress></progress> Preprocessing OCT and HE images...</div>
     <h3>OCT preprocessing</h3>
@@ -1415,7 +1419,7 @@ async function applyBatchKeepChoices(){ if(!batchId){ setStatus('No batch run to
 async function loadPaths(){ await withBusy('busy-load','Loading paths...', async()=>{ const j=await api('/api/load_paths',{oct_path:octPath.value,he_path:hePath.value,output_root:singleOutput.value}); sessionId=j.session_id; setStatus(`Loaded session ${sessionId}\nOutput: ${j.output_dir}`); }); }
 async function uploadFiles(){ await withBusy('busy-load','Uploading files...', async()=>{ const fd=new FormData(); fd.append('oct', octFile.files[0]); fd.append('he', heFile.files[0]); const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); sessionId=j.session_id; setStatus('Uploaded session '+sessionId); }); }
 async function preprocess(){ await withBusy('busy-preprocess','Preprocessing OCT and HE...', async()=>{ const j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); setStatus(JSON.stringify(j,null,2)); }); }
-async function flipHe(){ await withBusy('busy-preprocess','Flipping HE left-right and refreshing preprocessing...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); const j=await api('/api/flip_he',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); liveImages={overlay:null}; overlay.removeAttribute('src'); maskReg.removeAttribute('src'); setStatus(`HE image mirrored left-right. Rerun background removal and registration before saving.\nFlipped HE path: ${j.he_path}`); }); }
+async function flipHe(axis){ const label=axis==='x'?'up-down':'left-right'; await withBusy('busy-preprocess',`Flipping HE ${label} and refreshing preprocessing...`, async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); const j=await api('/api/flip_he',{session_id:sessionId,stain_normalizer:stain.value,axis}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); liveImages={overlay:null}; overlay.removeAttribute('src'); maskReg.removeAttribute('src'); setStatus(`HE image mirrored ${label}. Rerun background removal and registration before saving.\nFlipped HE path: ${j.he_path}`); }); }
 async function runAllProcessing(){ await withBusy('busy-preprocess','Running full pipeline...', async()=>{ if(!sessionId) throw new Error('Load OCT and HE images first.'); let j=await api('/api/preprocess',{session_id:sessionId,stain_normalizer:stain.value}); octRaw.src=img('oct_raw_display_preview.png'); octFlat.src=img('oct_flatfield_corrected_preview.png'); octTile.src=img('oct_tile_artifact_suppressed_preview.png'); octPre.src=img('oct_registered_preview.png'); hePre.src=img('he_standardized_native_preview.png'); heBW.src=img('he_black_white_input_preview.png'); j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); await saveMasks(); j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); j=await api('/api/save',{session_id:sessionId}); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(`Full processing complete.\nOutput: ${j.output_dir}`); }); }
 async function removeBackground(){ await withBusy('busy-mask','Removing background...', async()=>{ const j=await api('/api/masks',{session_id:sessionId,he_mask_mode:heMaskMode.value,he_gray_percentile:parseFloat(hePct.value)}); await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); setStatus(JSON.stringify(j,null,2)); }); }
 function imageLoad(src){ return new Promise((res,rej)=>{ const im=new Image(); im.onload=()=>res(im); im.onerror=rej; im.src=src; }); }
@@ -1598,7 +1602,7 @@ class AppHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/flip_he":
                 payload = _read_json(self)
                 paths = _session(payload["session_id"])
-                result = _flip_he_for_session(payload["session_id"], paths, payload.get("stain_normalizer", "torchstain_reinhard"))
+                result = _flip_he_for_session(payload["session_id"], paths, payload.get("stain_normalizer", "torchstain_reinhard"), payload.get("axis", "y"))
                 _json_response(self, result)
             elif parsed.path == "/api/masks":
                 payload = _read_json(self)
