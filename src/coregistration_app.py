@@ -699,6 +699,56 @@ def _preview_image(image: np.ndarray, max_dim: int = 1200) -> np.ndarray:
     return _resize_rgb(image, out_shape)
 
 
+def _fit_resize_meta(input_shape: tuple[int, int], output_shape: tuple[int, int]) -> dict[str, float | int]:
+    in_h, in_w = int(input_shape[0]), int(input_shape[1])
+    out_h, out_w = int(output_shape[0]), int(output_shape[1])
+    scale = min(out_h / max(1, in_h), out_w / max(1, in_w))
+    fit_h = max(1, int(round(in_h * scale)))
+    fit_w = max(1, int(round(in_w * scale)))
+    pad_y = (out_h - fit_h) // 2
+    pad_x = (out_w - fit_w) // 2
+    return {"scale": float(scale), "fit_h": fit_h, "fit_w": fit_w, "pad_y": pad_y, "pad_x": pad_x}
+
+
+def _fit_resize_to_canvas(image: np.ndarray, output_shape: tuple[int, int], fill: float | tuple[float, float, float]) -> tuple[np.ndarray, dict[str, float | int]]:
+    meta = _fit_resize_meta(image.shape[:2], output_shape)
+    fit_shape = (int(meta["fit_h"]), int(meta["fit_w"]))
+    resized = _resize_gray(image, fit_shape) if image.ndim == 2 else _resize_rgb(image, fit_shape)
+    if image.ndim == 2:
+        canvas = np.full(output_shape, float(fill), dtype=np.float32)
+    else:
+        fill_arr = np.asarray(fill, dtype=np.float32)
+        canvas = np.zeros((output_shape[0], output_shape[1], image.shape[2]), dtype=np.float32)
+        canvas[...] = fill_arr.reshape(1, 1, -1)
+    y0, x0 = int(meta["pad_y"]), int(meta["pad_x"])
+    if image.ndim == 2:
+        canvas[y0 : y0 + fit_shape[0], x0 : x0 + fit_shape[1]] = resized
+    else:
+        canvas[y0 : y0 + fit_shape[0], x0 : x0 + fit_shape[1], :] = resized
+    return canvas.astype(np.float32), meta
+
+
+def _search_mask_to_he_native(mask: np.ndarray, he_shape: tuple[int, int], fit_meta: dict[str, Any] | None) -> np.ndarray:
+    if not fit_meta:
+        return _resize_mask(mask, he_shape)
+    y0, x0 = int(fit_meta["pad_y"]), int(fit_meta["pad_x"])
+    fit_h, fit_w = int(fit_meta["fit_h"]), int(fit_meta["fit_w"])
+    crop = mask[y0 : y0 + fit_h, x0 : x0 + fit_w]
+    return _resize_mask(crop, he_shape)
+
+
+def _native_matrix_from_fit(search_matrix: np.ndarray, he_shape: tuple[int, int], oct_shape: tuple[int, int], search_shape: tuple[int, int], fit_meta: dict[str, Any] | None) -> np.ndarray:
+    if not fit_meta:
+        return _native_matrix(search_matrix, he_shape, oct_shape, search_shape)
+    he_to_search = np.eye(3, dtype=np.float64)
+    he_to_search[0, 0] = float(fit_meta["scale"])
+    he_to_search[1, 1] = float(fit_meta["scale"])
+    he_to_search[0, 2] = float(fit_meta["pad_y"])
+    he_to_search[1, 2] = float(fit_meta["pad_x"])
+    search_to_oct = np.diag([oct_shape[0] / search_shape[0], oct_shape[1] / search_shape[1], 1.0]).astype(np.float64)
+    return search_to_oct @ search_matrix @ he_to_search
+
+
 def _mask_overlay(base: np.ndarray, mask: np.ndarray, color: tuple[float, float, float] = (1.0, 0.12, 0.05)) -> np.ndarray:
     if base.ndim == 2:
         rgb = np.repeat(_to_uint8(base)[..., None], 3, axis=2).astype(np.float32) / 255.0
@@ -797,9 +847,10 @@ def _compute_masks(paths: SessionPaths, he_mask_mode: str, he_gray_percentile: f
     # v5 preprocessing is saved/displayed separately and applied after the v3
     # transform is estimated.
     oct_search = _resize_gray(oct_raw.astype(np.float32), search_shape)
-    he_search_rgb = _resize_rgb(he_raw.astype(np.float32) / (255.0 if he_raw.max() > 1.5 else 1.0), search_shape)
-    he_search_gray = _resize_gray(he_pre["gray"], search_shape)
-    he_search_rembg = _resize_rgb(he_pre["rembg_input"], search_shape)
+    he_float = he_raw.astype(np.float32) / (255.0 if he_raw.max() > 1.5 else 1.0)
+    he_search_rgb, he_fit = _fit_resize_to_canvas(he_float, search_shape, fill=(1.0, 1.0, 1.0))
+    he_search_gray, _ = _fit_resize_to_canvas(he_pre["gray"], search_shape, fill=1.0)
+    he_search_rembg, _ = _fit_resize_to_canvas(he_pre["rembg_input"], search_shape, fill=(0.0, 0.0, 0.0))
 
     oct_maps = _oct_maps(oct_search, oct_alpha)
     he_maps = _he_maps(
@@ -815,7 +866,7 @@ def _compute_masks(paths: SessionPaths, he_mask_mode: str, he_gray_percentile: f
     _save_gray_png(paths.root / "oct_mask_editor_base.png", exposure.rescale_intensity(oct_search, out_range=(0.0, 1.0)))
     _save_rgb_png(paths.root / "he_mask_editor_base.png", he_search_rgb)
     _save_gray_png(paths.root / "oct_search_feature.png", oct_maps.get("canonical_feature", oct_maps.get("feature", oct_search)))
-    he_search_bw = _resize_gray(he_pre["inverted_gray"], search_shape)
+    he_search_bw, _ = _fit_resize_to_canvas(he_pre["inverted_gray"], search_shape, fill=0.0)
     _save_gray_png(paths.root / "he_search_bw.png", he_search_bw)
     _save_rgb_png(paths.root / "oct_mask_overlay.png", _mask_overlay(oct_maps.get("base_intensity", oct_search), oct_maps["mask"], color=(0.0, 1.0, 0.28)))
     _save_rgb_png(paths.root / "he_mask_overlay.png", _mask_overlay(he_search_bw, he_maps["mask"], color=(1.0, 0.12, 0.05)))
@@ -823,6 +874,7 @@ def _compute_masks(paths: SessionPaths, he_mask_mode: str, he_gray_percentile: f
         "search_shape": list(search_shape),
         "he_mask_mode": he_mask_mode,
         "he_gray_percentile": he_gray_percentile,
+        "he_fit": he_fit,
         "he_mask_fraction": float(he_maps["mask"].mean()),
         "oct_mask_fraction": float(oct_maps["mask"].mean()),
     }
@@ -830,16 +882,19 @@ def _compute_masks(paths: SessionPaths, he_mask_mode: str, he_gray_percentile: f
     return mask_state
 
 
-def _build_search_maps(paths: SessionPaths) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], tuple[int, int], np.ndarray, np.ndarray]:
+def _build_search_maps(paths: SessionPaths) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], tuple[int, int], np.ndarray, np.ndarray, dict[str, Any] | None]:
     oct_raw = _oct_to_gray(_read_tiff(paths.oct_path))
     he_raw = _ensure_rgb(_read_tiff(paths.he_path))
-    search_shape = tuple(json.loads((paths.root / "mask_state.json").read_text())["search_shape"])
+    mask_state = json.loads((paths.root / "mask_state.json").read_text())
+    search_shape = tuple(mask_state["search_shape"])
     oct_pre = preprocess_oct_2d(oct_raw)
     he_pre = preprocess_he_rgb(he_raw)
     oct_search = _resize_gray(oct_raw.astype(np.float32), search_shape)
-    he_rgb = _resize_rgb(he_raw.astype(np.float32) / (255.0 if he_raw.max() > 1.5 else 1.0), search_shape)
-    he_gray = _resize_gray(he_pre["gray"], search_shape)
-    he_rembg = _resize_rgb(he_pre["rembg_input"], search_shape)
+    he_float = he_raw.astype(np.float32) / (255.0 if he_raw.max() > 1.5 else 1.0)
+    he_rgb, he_fit = _fit_resize_to_canvas(he_float, search_shape, fill=(1.0, 1.0, 1.0))
+    he_gray, _ = _fit_resize_to_canvas(he_pre["gray"], search_shape, fill=1.0)
+    he_rembg, _ = _fit_resize_to_canvas(he_pre["rembg_input"], search_shape, fill=(0.0, 0.0, 0.0))
+    mask_state.setdefault("he_fit", he_fit)
 
     oct_mask = _load_mask_png(paths.root / "oct_mask_edit.png")
     he_mask = _load_mask_png(paths.root / "he_mask_edit.png")
@@ -860,11 +915,11 @@ def _build_search_maps(paths: SessionPaths) -> tuple[dict[str, np.ndarray], dict
     he_maps["distance"] = _distance(he_maps["mask"])
     oct_maps.pop("boundary_distance", None)
     he_maps.pop("boundary_distance", None)
-    return oct_maps, he_maps, search_shape, he_raw, oct_pre["contrast"]
+    return oct_maps, he_maps, search_shape, he_raw, oct_pre["contrast"], mask_state.get("he_fit")
 
 
 def _estimate_registration(paths: SessionPaths) -> dict[str, Any]:
-    oct_maps, he_maps, search_shape, he_raw, oct_registered = _build_search_maps(paths)
+    oct_maps, he_maps, search_shape, he_raw, oct_registered, he_fit = _build_search_maps(paths)
     oct_center = _mask_center(oct_maps["mask"])
     he_center = _mask_center(he_maps["mask"])
     area_scale = math.sqrt(max(1.0, oct_maps["mask"].sum()) / max(1.0, he_maps["mask"].sum()))
@@ -914,7 +969,7 @@ def _estimate_registration(paths: SessionPaths) -> dict[str, Any]:
         raise RuntimeError("Auto registration failed to produce a candidate")
 
     search_matrix = _affine_with_tilt(best_params[0], best_params[1], best_params[2], best_params[3], best_params[4], best_params[5], he_center, oct_center)
-    native = _native_matrix(search_matrix, he_raw.shape[:2], tuple(oct_registered.shape[:2]), search_shape)
+    native = _native_matrix_from_fit(search_matrix, he_raw.shape[:2], tuple(oct_registered.shape[:2]), search_shape, he_fit)
     transform_state = {
         "auto_params": {
             "scale": float(best_params[0]),
@@ -970,8 +1025,9 @@ def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any
     )
     matrix = correction @ native_matrix
     he_standardized = tifffile.imread(str(paths.root / "he_standardized_native.tiff"))
-    he_mask = _resize_mask(_load_mask_png(paths.root / "he_mask_edit.png"), tuple(json.loads((paths.root / "mask_state.json").read_text())["search_shape"]))
-    he_mask_native = _resize_mask(he_mask, he_standardized.shape[:2])
+    mask_state = json.loads((paths.root / "mask_state.json").read_text())
+    he_mask = _resize_mask(_load_mask_png(paths.root / "he_mask_edit.png"), tuple(mask_state["search_shape"]))
+    he_mask_native = _search_mask_to_he_native(he_mask, he_standardized.shape[:2], mask_state.get("he_fit"))
     oct_mask = _resize_mask(_load_mask_png(paths.root / "oct_mask_edit.png"), output_shape)
     auto_he = _warp(he_standardized.astype(np.float32), native_matrix, output_shape, order=1)
     auto_he_mask = _warp(he_mask_native.astype(np.float32), native_matrix, output_shape, order=0) > 0.5
