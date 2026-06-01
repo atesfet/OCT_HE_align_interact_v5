@@ -263,6 +263,9 @@ def _known_output_files(root: Path) -> list[str]:
         "he_autoreg_mask_live_qc_preview.png",
         "oct_mask_live_qc_preview.png",
         "live_qc_state.json",
+        "live_backend_qc_preview.png",
+        "he_live_qc_source.png",
+        "he_mask_live_qc_source.png",
         "he_registered_masked_preview.png",
         "oct_registered_masked_preview.png",
         "he_registered.tiff",
@@ -406,6 +409,9 @@ def _ensure_interactive_artifacts(paths: SessionPaths) -> list[str]:
         "he_autoreg_mask_live_qc_preview.png",
         "oct_mask_live_qc_preview.png",
         "live_qc_state.json",
+        "live_backend_qc_preview.png",
+        "he_live_qc_source.png",
+        "he_mask_live_qc_source.png",
         "he_registered_masked_preview.png",
         "oct_registered_masked_preview.png",
     ]
@@ -947,15 +953,24 @@ def _apply_current_transform(paths: SessionPaths, transform_state: dict[str, Any
     _save_rgb_png(paths.root / "he_autoreg_live_qc_preview.png", _resize_rgb(auto_he.astype(np.float32), live_shape))
     _save_gray_png(paths.root / "he_autoreg_mask_live_qc_preview.png", _resize_mask(auto_he_mask, live_shape).astype(np.float32))
     _save_gray_png(paths.root / "oct_mask_live_qc_preview.png", _resize_mask(oct_mask, live_shape).astype(np.float32))
+    src_live_shape = (
+        max(1, int(round(he_standardized.shape[0] * live_shape[0] / max(1, output_shape[0])))),
+        max(1, int(round(he_standardized.shape[1] * live_shape[1] / max(1, output_shape[1])))),
+    )
+    _save_rgb_png(paths.root / "he_live_qc_source.png", _resize_rgb(he_standardized.astype(np.float32), src_live_shape))
+    _save_gray_png(paths.root / "he_mask_live_qc_source.png", _resize_mask(he_mask_native, src_live_shape).astype(np.float32))
     (paths.root / "live_qc_state.json").write_text(
         json.dumps(
             {
                 "native_shape": [int(output_shape[0]), int(output_shape[1])],
                 "live_shape": [int(live_shape[0]), int(live_shape[1])],
+                "he_native_shape": [int(he_standardized.shape[0]), int(he_standardized.shape[1])],
+                "he_live_source_shape": [int(src_live_shape[0]), int(src_live_shape[1])],
             },
             indent=2,
         )
     )
+    _render_live_qc_preview(paths, manual)
     _save_gray_png(paths.root / "registered_mask_preview.png", overlap.astype(np.float32))
     _save_rgb_png(paths.root / "he_registered_masked_preview.png", warped_he * overlap[..., None].astype(np.float32))
     _save_gray_png(paths.root / "oct_registered_masked_preview.png", oct_registered * overlap.astype(np.float32))
@@ -973,6 +988,62 @@ def _overlay_preview(he_rgb: np.ndarray, oct_gray: np.ndarray, mask: np.ndarray,
     out[..., 2] = np.maximum(out[..., 2], oct_img * 0.35)
     out[~mask.astype(bool)] *= 0.82
     return np.clip(out, 0, 1)
+
+
+def _manual_from_payload(payload: dict[str, Any]) -> dict[str, float]:
+    return {
+        "scale": float(payload.get("scale", 1.0)),
+        "stretch_x": float(payload.get("stretch_x", 1.0)),
+        "stretch_y": float(payload.get("stretch_y", 1.0)),
+        "rotation_deg": float(payload.get("rotation_deg", 0.0)),
+        "translation_y": float(payload.get("translation_y", 0.0)),
+        "translation_x": float(payload.get("translation_x", 0.0)),
+        "he_opacity": float(payload.get("he_opacity", 0.65)),
+    }
+
+
+def _render_live_qc_preview(paths: SessionPaths, manual: dict[str, float]) -> None:
+    state_path = paths.root / "live_qc_state.json"
+    required = [
+        paths.root / "he_live_qc_source.png",
+        paths.root / "he_mask_live_qc_source.png",
+        paths.root / "oct_live_qc_preview.png",
+        paths.root / "oct_mask_live_qc_preview.png",
+    ]
+    if not state_path.exists() or any(not p.exists() for p in required):
+        _apply_current_transform(paths)
+    live_state = json.loads(state_path.read_text())
+    live_shape = tuple(int(v) for v in live_state["live_shape"])
+    native_shape = tuple(int(v) for v in live_state["native_shape"])
+    he_native_shape = tuple(int(v) for v in live_state.get("he_native_shape", native_shape))
+    he_live_shape = tuple(int(v) for v in live_state.get("he_live_source_shape", live_shape))
+    state = json.loads((paths.root / "transform_state.json").read_text())
+    native_matrix = np.asarray(state["native_matrix"], dtype=np.float64)
+    correction_native = _manual_matrix(
+        native_shape,
+        float(manual.get("scale", 1.0)),
+        float(manual.get("stretch_x", 1.0)),
+        float(manual.get("stretch_y", 1.0)),
+        float(manual.get("rotation_deg", 0.0)),
+        float(manual.get("translation_y", 0.0)),
+        float(manual.get("translation_x", 0.0)),
+    )
+    full_native = correction_native @ native_matrix
+    dest_scale = np.eye(3, dtype=np.float64)
+    dest_scale[0, 0] = live_shape[1] / max(1, native_shape[1])
+    dest_scale[1, 1] = live_shape[0] / max(1, native_shape[0])
+    src_scale = np.eye(3, dtype=np.float64)
+    src_scale[0, 0] = he_live_shape[1] / max(1, he_native_shape[1])
+    src_scale[1, 1] = he_live_shape[0] / max(1, he_native_shape[0])
+    preview_matrix = dest_scale @ full_native @ np.linalg.inv(src_scale)
+    he = np.asarray(Image.open(paths.root / "he_live_qc_source.png")).astype(np.float32)
+    oct_img = np.asarray(Image.open(paths.root / "oct_live_qc_preview.png")).astype(np.float32)
+    he_mask = np.asarray(Image.open(paths.root / "he_mask_live_qc_source.png")).astype(np.float32) > 127
+    oct_mask = np.asarray(Image.open(paths.root / "oct_mask_live_qc_preview.png")).astype(np.float32) > 127
+    warped_he = _warp(he, preview_matrix, live_shape, order=1)
+    warped_he_mask = _warp(he_mask.astype(np.float32), preview_matrix, live_shape, order=0) > 0.5
+    overlap = warped_he_mask & oct_mask
+    _save_rgb_png(paths.root / "live_backend_qc_preview.png", _overlay_preview(warped_he, oct_img, overlap, float(manual.get("he_opacity", 0.65))))
 
 
 HTML = r"""
@@ -1283,7 +1354,7 @@ HTML = r"""
   <section><h2>Status</h2><div id="status" class="status">Ready.</div></section>
 </main>
 <script>
-let sessionId=null; let debounce=null; let liveImages={he:null,oct:null,heMask:null,octMask:null}; let liveState=null; let batchId=null; let batchTimer=null;
+let sessionId=null; let debounce=null; let liveDebounce=null; let liveSeq=0; let liveImages={overlay:null}; let batchId=null; let batchTimer=null;
 let editors={};
 function setStatus(x){ document.getElementById('status').textContent = x; }
 async function api(path, body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
@@ -1298,7 +1369,7 @@ function opacityNumberAdjust(){ const v=Math.max(0,Math.min(1,parseFloat(heOpaci
 function hydrateManualControls(state){ const manual=(state&&state.transform_state&&state.transform_state.manual)||{}; fitSliderToValue(mScale,manual.scale ?? 1); fitSliderToValue(mStretchX,manual.stretch_x ?? 1); fitSliderToValue(mStretchY,manual.stretch_y ?? 1); fitSliderToValue(mRot,manual.rotation_deg ?? 0); fitSliderToValue(mTy,manual.translation_y ?? 0); fitSliderToValue(mTx,manual.translation_x ?? 0); const op=Math.max(0,Math.min(1,parseFloat(manual.he_opacity ?? 0.65))); heOpacity.value=op; heOpacityV.value=op; updateManualDisplays(); }
 function hydrateSaveLinks(files){ const clean=['output/he_registered.tiff','output/oct_registered.tiff','output/registered_mask.tiff','alignment_summary.json'].filter(f=>files.includes(f)); saveLinks.innerHTML=clean.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); }
 async function scanProcessedOutputs(){ await withBusy('busy-processed','Scanning processed outputs...', async()=>{ const j=await api('/api/processed_scan',{output_root:processedRoot.value}); processedSample.innerHTML = j.samples.length ? j.samples.map(s=>`<option value="${s.path}">${s.name}</option>`).join('') : '<option value="">No processed samples found</option>'; setStatus(`Found ${j.samples.length} processed sample(s).`); }); }
-async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_mask_editor_base.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_mask_editor_base.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); if(files.includes('he_autoreg_live_qc_preview.png')&&files.includes('oct_live_qc_preview.png')&&files.includes('he_autoreg_mask_live_qc_preview.png')&&files.includes('oct_mask_live_qc_preview.png')&&files.includes('live_qc_state.json')) { try { await refreshReg(); } catch(_) {} } else { liveImages={he:null,oct:null,heMask:null,octMask:null}; liveState=null; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
+async function loadProcessedSample(){ await withBusy('busy-processed','Loading processed sample...', async()=>{ const j=await api('/api/processed_load',{sample_dir:processedSample.value}); sessionId=j.session_id; const files=j.files||[]; showProcessedImages(files); hydrateManualControls(j.state||{}); hydrateSaveLinks(files); if(files.includes('oct_mask_edit.png')&&files.includes('oct_mask_editor_base.png')) await loadCanvas('octCanvas','oct_mask_edit.png','oct_mask_editor_base.png',[0,255,70]); if(files.includes('he_mask_edit.png')&&files.includes('he_mask_editor_base.png')) await loadCanvas('heCanvas','he_mask_edit.png','he_mask_editor_base.png',[255,35,20]); if(files.includes('live_backend_qc_preview.png')) { try { await refreshReg(); } catch(_) {} } else { liveImages={overlay:null}; } const rebuilt=(j.rebuilt||[]).length ? `\nBackfilled missing reload files: ${j.rebuilt.join(', ')}.` : ''; setStatus(`Loaded processed sample: ${j.sample_name}\nOutput: ${j.output_dir}\nAll available previews, masks, overlays, save links, and manual controls were filled.\n${j.can_manual_adjust ? 'Manual adjustment is available.' : 'Manual adjustment needs transform_state.json from an interactive run.'}${rebuilt}`); }); }
 function batchImg(record){ return `/api/batch_file?batch=${encodeURIComponent(batchId||'')}&case=${encodeURIComponent(record.case_id)}&name=${encodeURIComponent(record.overlay||'overlay_preview.png')}&t=${Date.now()}`; }
 function updateBatchProgress(job){ const total=Number(job?.total||0); const completed=Number(job?.completed||0); const progress=document.getElementById('batchProgress'); const text=document.getElementById('batchProgressText'); if(progress){ progress.max=Math.max(total,1); progress.value=Math.min(completed,total); } if(text){ const remaining=Math.max(total-completed,0); text.textContent=`Detected ${total} sample${total===1?'':'s'}. Completed ${completed}. Remaining ${remaining}.`; } }
 function renderBatch(job){ const status=document.getElementById('batchStatus'); const results=document.getElementById('batchResults'); if(!job){ updateBatchProgress(null); status.textContent='No batch run started.'; if(results)results.innerHTML=''; return; } updateBatchProgress(job); status.textContent=`Batch ${job.batch_id}: ${job.status}. ${job.completed}/${job.total} complete. Output: ${job.output_root}`; const cards=(job.results||[]).slice().sort((a,b)=>(a.case_id||'').localeCompare(b.case_id||'')); if(!cards.length){ results.innerHTML='<div class="small">Waiting for the first completed sample preview...</div>'; return; } results.innerHTML=cards.map(r=>{ const ok=r.status==='ok'; const deleted=r.status==='deleted'; const badge=deleted?'deleted':(ok?'complete':'failed'); const imgHtml=ok&&!deleted?`<img loading="lazy" decoding="async" src="${batchImg(r)}" alt="overlay preview for ${r.case_id}">`:`<div class="small">${r.error||'Registration failed. Check run.log in the output folder.'}</div>`; const checked=r.keep!==false&&!deleted?'checked':''; const disabled=deleted?'disabled':''; return `<div class="batch-card ${ok?'':'failed'} ${deleted?'deleted':''}"><div class="caption">${r.case_id}</div>${imgHtml}<div class="keep-row"><span class="pill ${ok?'':'failed'}">${badge}</span><label><input type="checkbox" data-case="${r.case_id}" ${checked} ${disabled}> keep</label></div><div class="small">${r.output_dir||''}</div></div>`; }).join(''); }
@@ -1320,12 +1391,11 @@ function canvasData(id){ const ed=editors[id]; return ed ? ed.maskCanvas.toDataU
 async function saveMasks(){ const j=await api('/api/save_masks',{session_id:sessionId,oct_mask:canvasData('octCanvas'),he_mask:canvasData('heCanvas')}); setStatus(JSON.stringify(j,null,2)); }
 async function autoRegister(){ await withBusy('busy-autoreg','Running auto registration...', async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
 function manualPayload(){ return {session_id:sessionId,scale:parseFloat(mScale.value),stretch_x:parseFloat(mStretchX.value),stretch_y:parseFloat(mStretchY.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value),he_opacity:parseFloat(heOpacity.value)}; }
-function manualAdjust(){ updateManualDisplays(); heOpacityV.value=heOpacity.value; drawLiveOverlay(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Applying manual adjustment to Backend overlay/QC...'); await api('/api/manual',manualPayload()); overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); setStatus('Manual adjustment applied.'); },650); }
-async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.he=await imageLoad(img('he_autoreg_live_qc_preview.png')); liveImages.oct=await imageLoad(img('oct_live_qc_preview.png')); liveImages.heMask=await imageLoad(img('he_autoreg_mask_live_qc_preview.png')); liveImages.octMask=await imageLoad(img('oct_mask_live_qc_preview.png')); liveState=await jsonFile('live_qc_state.json'); initLiveCanvas(); drawLiveOverlay(); }
-function initLiveCanvas(){ if(!liveImages.oct)return; liveOverlay.width=liveImages.oct.width; liveOverlay.height=liveImages.oct.height; }
-function liveScale(){ const native=liveState&&liveState.native_shape ? liveState.native_shape : [liveOverlay.height,liveOverlay.width]; return {x:liveOverlay.width/Math.max(1,native[1]), y:liveOverlay.height/Math.max(1,native[0])}; }
-function drawTransformed(image,w,h){ const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h; const ctx=canvas.getContext('2d'); const sc=liveScale(); ctx.save(); ctx.translate(w/2+parseFloat(mTx.value)*sc.x,h/2+parseFloat(mTy.value)*sc.y); ctx.rotate(parseFloat(mRot.value)*Math.PI/180); const s=parseFloat(mScale.value); ctx.scale(s*parseFloat(mStretchX.value),s*parseFloat(mStretchY.value)); ctx.drawImage(image,-w/2,-h/2,w,h); ctx.restore(); return ctx.getImageData(0,0,w,h); }
-function drawLiveOverlay(){ heOpacityV.value=heOpacity.value; if(!liveImages.he||!liveImages.oct||!liveImages.heMask||!liveImages.octMask)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.oct.width){initLiveCanvas();} const w=c.width,h=c.height; const octCanvas=document.createElement('canvas'); octCanvas.width=w; octCanvas.height=h; const octCtx=octCanvas.getContext('2d'); octCtx.drawImage(liveImages.oct,0,0,w,h); const omCanvas=document.createElement('canvas'); omCanvas.width=w; omCanvas.height=h; const omCtx=omCanvas.getContext('2d'); omCtx.drawImage(liveImages.octMask,0,0,w,h); const he=drawTransformed(liveImages.he,w,h); const hm=drawTransformed(liveImages.heMask,w,h); const oct=octCtx.getImageData(0,0,w,h); const om=omCtx.getImageData(0,0,w,h); const out=ctx.createImageData(w,h); const opacity=Math.max(0,Math.min(1,parseFloat(heOpacity.value)||0)); const heWeight=0.82*opacity; for(let i=0;i<out.data.length;i+=4){ const octV=oct.data[i]/255; const inMask=hm.data[i]>127&&om.data[i]>127; out.data[i]=Math.min(255,he.data[i]*heWeight); out.data[i+1]=Math.min(255,Math.max(he.data[i+1]*heWeight,octV*0.95*255)); out.data[i+2]=Math.min(255,Math.max(he.data[i+2]*heWeight,octV*0.35*255)); if(!inMask){ out.data[i]*=0.82; out.data[i+1]*=0.82; out.data[i+2]*=0.82; } out.data[i+3]=255; } ctx.putImageData(out,0,0); }
+function manualAdjust(){ updateManualDisplays(); heOpacityV.value=heOpacity.value; scheduleLivePreview(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Applying manual adjustment to Backend overlay/QC...'); await api('/api/manual',manualPayload()); overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); setStatus('Manual adjustment applied.'); },650); }
+async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.overlay=await imageLoad(img('live_backend_qc_preview.png')); initLiveCanvas(); drawLiveOverlay(); }
+function initLiveCanvas(){ if(!liveImages.overlay)return; liveOverlay.width=liveImages.overlay.width; liveOverlay.height=liveImages.overlay.height; }
+function drawLiveOverlay(){ heOpacityV.value=heOpacity.value; if(!liveImages.overlay)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.overlay.width){initLiveCanvas();} ctx.clearRect(0,0,c.width,c.height); ctx.drawImage(liveImages.overlay,0,0,c.width,c.height); }
+function scheduleLivePreview(){ clearTimeout(liveDebounce); const seq=++liveSeq; liveDebounce=setTimeout(async()=>{ if(!sessionId)return; try{ await api('/api/live_preview',manualPayload()); if(seq!==liveSeq)return; liveImages.overlay=await imageLoad(img('live_backend_qc_preview.png')); if(seq!==liveSeq)return; initLiveCanvas(); drawLiveOverlay(); } catch(e){ setStatus('Live preview error: '+e.message); } },90); }
 async function saveFinal(){ await withBusy('busy-save','Saving final outputs...', async()=>{ if(sessionId) await api('/api/manual',manualPayload()); const j=await api('/api/save',{session_id:sessionId}); await refreshReg(); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(JSON.stringify(j,null,2)); }); }
 </script>
 </body>
@@ -1510,19 +1580,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 paths = _session(payload["session_id"])
                 state = _estimate_registration(paths)
                 _json_response(self, state)
+            elif parsed.path == "/api/live_preview":
+                payload = _read_json(self)
+                paths = _session(payload["session_id"])
+                manual = _manual_from_payload(payload)
+                _render_live_qc_preview(paths, manual)
+                _json_response(self, {"ok": True, "preview": "live_backend_qc_preview.png"})
             elif parsed.path == "/api/manual":
                 payload = _read_json(self)
                 paths = _session(payload["session_id"])
                 state = json.loads((paths.root / "transform_state.json").read_text())
-                state["manual"] = {
-                    "scale": float(payload.get("scale", 1.0)),
-                    "stretch_x": float(payload.get("stretch_x", 1.0)),
-                    "stretch_y": float(payload.get("stretch_y", 1.0)),
-                    "rotation_deg": float(payload.get("rotation_deg", 0.0)),
-                    "translation_y": float(payload.get("translation_y", 0.0)),
-                    "translation_x": float(payload.get("translation_x", 0.0)),
-                    "he_opacity": float(payload.get("he_opacity", 0.65)),
-                }
+                state["manual"] = _manual_from_payload(payload)
                 (paths.root / "transform_state.json").write_text(json.dumps(state, indent=2))
                 _apply_current_transform(paths, state)
                 _json_response(self, {"ok": True, "manual": state["manual"]})
