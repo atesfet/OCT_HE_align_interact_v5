@@ -1354,7 +1354,7 @@ HTML = r"""
   <section><h2>Status</h2><div id="status" class="status">Ready.</div></section>
 </main>
 <script>
-let sessionId=null; let debounce=null; let liveDebounce=null; let liveSeq=0; let liveImages={overlay:null}; let batchId=null; let batchTimer=null;
+let sessionId=null; let debounce=null; let liveDebounce=null; let liveInFlight=false; let liveQueued=false; let liveImages={overlay:null}; let batchId=null; let batchTimer=null;
 let editors={};
 function setStatus(x){ document.getElementById('status').textContent = x; }
 async function api(path, body){ const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); const j=await r.json(); if(!r.ok) throw new Error(j.error||r.statusText); return j; }
@@ -1391,11 +1391,12 @@ function canvasData(id){ const ed=editors[id]; return ed ? ed.maskCanvas.toDataU
 async function saveMasks(){ const j=await api('/api/save_masks',{session_id:sessionId,oct_mask:canvasData('octCanvas'),he_mask:canvasData('heCanvas')}); setStatus(JSON.stringify(j,null,2)); }
 async function autoRegister(){ await withBusy('busy-autoreg','Running auto registration...', async()=>{ await saveMasks(); const j=await api('/api/autoreg',{session_id:sessionId}); await refreshReg(); setStatus(JSON.stringify(j.auto_params,null,2)); }); }
 function manualPayload(){ return {session_id:sessionId,scale:parseFloat(mScale.value),stretch_x:parseFloat(mStretchX.value),stretch_y:parseFloat(mStretchY.value),rotation_deg:parseFloat(mRot.value),translation_y:parseFloat(mTy.value),translation_x:parseFloat(mTx.value),he_opacity:parseFloat(heOpacity.value)}; }
-function manualAdjust(){ updateManualDisplays(); heOpacityV.value=heOpacity.value; scheduleLivePreview(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Applying manual adjustment to Backend overlay/QC...'); await api('/api/manual',manualPayload()); overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); setStatus('Manual adjustment applied.'); },650); }
+function manualAdjust(){ updateManualDisplays(); heOpacityV.value=heOpacity.value; scheduleLivePreview(); clearTimeout(debounce); debounce=setTimeout(async()=>{ if(!sessionId)return; setStatus('Manual adjustment previewed. Click Save Final to write native-resolution outputs.'); },650); }
 async function refreshReg(){ overlay.src=img('overlay_preview.png'); maskReg.src=img('registered_mask_preview.png'); liveImages.overlay=await imageLoad(img('live_backend_qc_preview.png')); initLiveCanvas(); drawLiveOverlay(); }
 function initLiveCanvas(){ if(!liveImages.overlay)return; liveOverlay.width=liveImages.overlay.width; liveOverlay.height=liveImages.overlay.height; }
 function drawLiveOverlay(){ heOpacityV.value=heOpacity.value; if(!liveImages.overlay)return; const c=liveOverlay, ctx=c.getContext('2d'); if(c.width!==liveImages.overlay.width){initLiveCanvas();} ctx.clearRect(0,0,c.width,c.height); ctx.drawImage(liveImages.overlay,0,0,c.width,c.height); }
-function scheduleLivePreview(){ clearTimeout(liveDebounce); const seq=++liveSeq; liveDebounce=setTimeout(async()=>{ if(!sessionId)return; try{ await api('/api/live_preview',manualPayload()); if(seq!==liveSeq)return; liveImages.overlay=await imageLoad(img('live_backend_qc_preview.png')); if(seq!==liveSeq)return; initLiveCanvas(); drawLiveOverlay(); } catch(e){ setStatus('Live preview error: '+e.message); } },90); }
+function scheduleLivePreview(){ liveQueued=true; clearTimeout(liveDebounce); liveDebounce=setTimeout(runLivePreview,220); }
+async function runLivePreview(){ if(!sessionId||liveInFlight)return; if(!liveQueued)return; liveQueued=false; liveInFlight=true; try{ await api('/api/live_preview',manualPayload()); liveImages.overlay=await imageLoad(img('live_backend_qc_preview.png')); initLiveCanvas(); drawLiveOverlay(); } catch(e){ setStatus('Live preview error: '+e.message); } finally { liveInFlight=false; if(liveQueued){ clearTimeout(liveDebounce); liveDebounce=setTimeout(runLivePreview,80); } } }
 async function saveFinal(){ await withBusy('busy-save','Saving final outputs...', async()=>{ if(sessionId) await api('/api/manual',manualPayload()); const j=await api('/api/save',{session_id:sessionId}); await refreshReg(); saveLinks.innerHTML = j.files.map(f=>`<div><a href="/api/file?session=${sessionId}&name=${f}" target="_blank">${f}</a></div>`).join(''); setStatus(JSON.stringify(j,null,2)); }); }
 </script>
 </body>
