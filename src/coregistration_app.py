@@ -1020,10 +1020,11 @@ def _overlay_preview(he_rgb: np.ndarray, oct_gray: np.ndarray, mask: np.ndarray,
     he = _to_uint8(he_rgb).astype(np.float32) / 255.0
     oct_img = _to_uint8(oct_gray).astype(np.float32) / 255.0
     opacity = float(np.clip(he_opacity, 0.0, 1.0))
-    he_weight = 0.82 * opacity
+    he_weight = min(1.15, 1.15 * (opacity**0.65))
+    oct_weight = 1.0 - 0.45 * opacity
     out = he * he_weight
-    out[..., 1] = np.maximum(out[..., 1], oct_img * 0.95)
-    out[..., 2] = np.maximum(out[..., 2], oct_img * 0.35)
+    out[..., 1] = np.maximum(out[..., 1], oct_img * 0.95 * oct_weight)
+    out[..., 2] = np.maximum(out[..., 2], oct_img * 0.35 * oct_weight)
     out[~mask.astype(bool)] *= 0.82
     return np.clip(out, 0, 1)
 
